@@ -1,0 +1,20 @@
+[project]
+name = "view-mesh"
+version = "0.1.0"
+description = "Viewer for 3D mesh data."
+readme = "README.md"
+authors = [
+    { name = "Gianni Mariani", email = "owebeeone@gmail.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "pythonopenscad>=2.2.1",
+    "pyside6>=6.9.0"
+]
+
+[project.scripts]
+view-mesh = "view_mesh:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
