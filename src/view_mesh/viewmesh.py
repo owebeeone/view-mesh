@@ -3,6 +3,8 @@ import asyncio
 import json
 import os
 import sys
+import ctypes
+from ctypes import wintypes
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
@@ -15,11 +17,11 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import (
     Qt, QDir, QModelIndex, QSize, QPoint, QSettings, 
-    QEvent, QFile, QStandardPaths, Signal, QTimer, QRect
+    QEvent, QFile, QStandardPaths, Signal, QTimer, QRect, QObject
 )
 from PySide6.QtGui import (
     QIcon, QAction, QKeySequence, QCloseEvent, QFont, 
-    QMouseEvent, QColor, QPalette, QResizeEvent, QPainter
+    QMouseEvent, QColor, QPalette, QResizeEvent, QPainter, QCursor, QFontMetrics
 )
 
 @dataclass
@@ -27,13 +29,13 @@ class WindowSettings:
     """Store window position, size and state."""
     size: Tuple[int, int] = (1024, 768)
     position: Tuple[int, int] = (100, 100)
-    # Store position relative to screen (not global)
     relative_position: Tuple[float, float] = (0.1, 0.1)  # As percentage of screen width/height
     is_maximized: bool = False
     explorer_width: int = 250
     state: Optional[bytes] = None
     screen_name: str = ""  # Store screen identifier
     screen_geometry: Tuple[int, int, int, int] = (0, 0, 0, 0)  # x, y, width, height of screen
+    global_font_size_adjust: int = 0 # New field
     
     @classmethod
     def from_settings(cls, settings: QSettings) -> 'WindowSettings':
@@ -92,6 +94,9 @@ class WindowSettings:
                 except:
                     pass
         
+        if settings.contains("window/global_font_size_adjust"):
+            result.global_font_size_adjust = settings.value("window/global_font_size_adjust", 0, type=int)
+        
         return result
     
     def save_to_settings(self, settings: QSettings) -> None:
@@ -104,6 +109,7 @@ class WindowSettings:
         settings.setValue("window/screen_name", self.screen_name)
         # Store screen geometry as a string to avoid Qt serialization issues
         settings.setValue("window/screen_geometry", str(self.screen_geometry))
+        settings.setValue("window/global_font_size_adjust", self.global_font_size_adjust) # Save new field
         if self.state:
             settings.setValue("window/state", self.state)
 
@@ -168,10 +174,10 @@ class FileExplorerWidget(QWidget):
         self.tree_view.clicked.connect(self._on_item_clicked)
         self.tree_view.doubleClicked.connect(self._on_item_double_clicked)
         
-        # Set consistent font for tree view items
-        tree_font = self.tree_view.font()
-        tree_font.setPointSize(10)
-        self.tree_view.setFont(tree_font)
+        # Set consistent font for tree view items - REMOVE FIXED SIZE
+        # tree_font = self.tree_view.font()
+        # tree_font.setPointSize(10) # Let it inherit from application font
+        # self.tree_view.setFont(tree_font)
         
         # Visual improvements for the tree view
         self.tree_view.setAlternatingRowColors(True)
@@ -212,15 +218,15 @@ class CustomTitleBar(QWidget):
         icon_label = QLabel("📁")
         icon_label.setFixedWidth(20)
         font = icon_label.font()
-        font.setPointSize(10)
+        # font.setPointSize(10) # Allow inheritance
         icon_label.setFont(font)
         icon_label.setStyleSheet("color: #ffffff;")  # Brighter color for better contrast
         
         # Title label
         self.title_label = QLabel(title)
         font = self.title_label.font()
-        font.setPointSize(10)
-        font.setBold(True)  # Make it slightly bold for emphasis
+        # font.setPointSize(10) # Allow inheritance
+        font.setBold(True) 
         self.title_label.setFont(font)
         self.title_label.setStyleSheet("color: #ffffff;")  # Brighter color for better contrast
         
@@ -250,8 +256,6 @@ class CustomWindowFrame(QWidget):
         super().__init__(parent)
         self.parent = parent
         self.setup_ui()
-        self.is_dragging = False
-        self.drag_position = QPoint()
         
     def setup_ui(self):
         """Set up the UI components."""
@@ -377,28 +381,44 @@ class CustomWindowFrame(QWidget):
     
     def mousePressEvent(self, event: QMouseEvent):
         """Handle mouse press events for dragging the window."""
+        # This event should be handled by the main ViewMeshApp window for frameless mode
+        # when dragging the application's custom title bar.
+        # If CustomWindowFrame were used as a standalone, non-frameless window's content,
+        # then this might be relevant, but not for the main app window dragging.
         if event.button() == Qt.LeftButton and self.title_bar.geometry().contains(event.pos()):
-            self.is_dragging = True
-            self.drag_position = event.globalPos() - self.parent.frameGeometry().topLeft()
-            event.accept()
-    
-    def mouseReleaseEvent(self, event: QMouseEvent):
-        """Handle mouse release events for dragging the window."""
-        if event.button() == Qt.LeftButton:
-            self.is_dragging = False
-            event.accept()
-    
-    def mouseMoveEvent(self, event: QMouseEvent):
-        """Handle mouse move events for dragging the window."""
-        if self.is_dragging and event.buttons() & Qt.LeftButton:
-            self.parent.move(event.globalPos() - self.drag_position)
-            event.accept()
-    
-    def mouseDoubleClickEvent(self, event: QMouseEvent):
-        """Handle double-click events on the title bar to maximize/restore."""
-        if self.title_bar.geometry().contains(event.pos()):
-            self.on_maximize_restore()
-            event.accept()
+            # Check if the click is on a button within the title bar
+            for child in self.title_bar.findChildren(QPushButton):
+                if child.geometry().contains(event.pos() - self.title_bar.pos()): # Adjust pos to child's coordinate system
+                    # Let the button handle its own press
+                    return super().mousePressEvent(event)
+            
+            # If not on a button, and if on Windows, try to initiate system drag
+            if sys.platform == "win32":
+                try:
+                    # Ensure ReleaseCapture and SendMessage are available (might need to be class members or initialized)
+                    # For this example, assuming they are initialized in ViewMeshApp and accessible
+                    # Or, more directly:
+                    ReleaseCapture = ctypes.windll.user32.ReleaseCapture
+                    SendMessage = ctypes.windll.user32.SendMessageW
+                    
+                    ReleaseCapture()
+                    # WM_NCLBUTTONDOWN = 0x00A1, HTCAPTION = 2
+                    # Important: SendMessage should target the TOP-LEVEL window (self.parent in this context if parent is ViewMeshApp)
+                    SendMessage(int(self.parent.winId()), 0x00A1, 2, 0)
+                    event.accept()
+                    return # Drag initiated by OS
+                except AttributeError as e:
+                    print(f"WinAPI functions not available or parent not set up for CustomWindowFrame drag: {e}")
+                except Exception as e:
+                    print(f"Error in CustomWindowFrame drag API: {e}")
+            
+            # Fallback or non-Windows: Delegate to parent if possible, or handle locally if this frame is meant to be independently draggable.
+            # For the main application, ViewMeshApp should handle this.
+            # If this CustomWindowFrame is truly independent and needs its own dragging:
+            # self.is_dragging = True
+            # self.drag_position = event.globalPos() - self.parent.frameGeometry().topLeft()
+            # event.accept()
+        super().mousePressEvent(event) # Pass on if not handled
 
 class ViewMeshApp(QMainWindow):
     """Main ViewMesh application window."""
@@ -406,6 +426,24 @@ class ViewMeshApp(QMainWindow):
     def __init__(self, config: AppConfig):
         super().__init__(None, Qt.FramelessWindowHint)  # Make window frameless
         self.config = config
+        self.setObjectName("ViewMeshAppMainWindow") # Added for event filter logging
+        self.was_maximized_before_fullscreen = False # Initialize flag
+        
+        # Flags and positions for context menu initiated move
+        self.is_context_menu_moving = False
+        self.context_menu_drag_start_position = None
+        self.context_menu_window_start_position = None
+
+        # Timer for context menu initiated move
+        self.context_move_timer = QTimer(self)
+        self.context_move_timer.setInterval(16) # Roughly 60 FPS
+        self.context_move_timer.timeout.connect(self._perform_context_menu_move)
+
+        # Font size adjustment - Initialize from saved config
+        self.global_font_size_adjust = self.config.settings.global_font_size_adjust
+        _app_font = QApplication.font() 
+        self.initial_app_font_point_size = _app_font.pointSize()
+        self.initial_app_font_family = _app_font.family()
         
         # Set window title
         self.setWindowTitle(config.app_name)
@@ -413,21 +451,44 @@ class ViewMeshApp(QMainWindow):
         # Set up async event loop integration
         self.setup_async_loop()
         
-        # Set up UI
+        # Set up UI (event filter for title_bar will be installed here)
         self.setup_ui()
         
         # Restore window state
         self.restore_window_state()
         
+        # Apply initial font size adjustment if any (AFTER UI is set up and state restored)
+        if self.global_font_size_adjust != 0:
+            # print(f"[DEBUG __init__] Applying initial font adjustment: {self.global_font_size_adjust}")
+            self._apply_global_font_change()
+        
         # Set resize cursor for window edges
         self.setMouseTracking(True)
-        self.resize_padding = 5  # Padding area for resizing
-        self.resizing = False
-        self.resize_direction = None
+        self.resize_padding = 5
         
-        # Window dragging variables
         self.dragging = False
         self.drag_start_position = None
+        self.window_start_position = None
+        
+        if sys.platform == "win32":
+            try:
+                self.user32 = ctypes.windll.user32
+                self.ReleaseCapture = self.user32.ReleaseCapture
+                self.SendMessage = self.user32.SendMessageW
+                self.PostMessage = self.user32.PostMessageW # Load PostMessageW
+                # print("Windows API functions for window management initialized (SendMessage, PostMessage)")
+            except Exception as e:
+                print(f"Error initializing Windows API functions: {e}")
+                self.ReleaseCapture = None
+                self.SendMessage = None
+                self.PostMessage = None # Ensure it's None on error
+        else:
+            self.ReleaseCapture = None
+            self.SendMessage = None
+            self.PostMessage = None # Ensure it's None on non-Windows
+        
+        self.installEventFilter(self) # Install event filter for ViewMeshApp itself
+        # print(f"Event filter installed on {self.objectName()} in __init__") # DEBUG PRINT
     
     def setup_ui(self):
         """Set up the main UI components."""
@@ -437,12 +498,16 @@ class ViewMeshApp(QMainWindow):
         
         # Main layout for the UI
         self.main_layout = QVBoxLayout(self.central_widget)
-        self.main_layout.setContentsMargins(1, 1, 1, 1)  # Minimal margins for border
+        self.main_layout.setContentsMargins(1, 1, 1, 1)
         self.main_layout.setSpacing(0)
         
         # Create title bar with integrated menu and window controls
         self.title_bar = QWidget()
-        self.title_bar.setFixedHeight(24)  # Reduced to 24px total
+        self.title_bar.setObjectName("custom_title_bar_widget")
+        self.title_bar.installEventFilter(self)
+        # print(f"Event filter installed on {self.title_bar.objectName()} in setup_ui")
+        # self.title_bar.setFixedHeight(24) # Allow dynamic height based on content
+        self.title_bar.setContextMenuPolicy(Qt.CustomContextMenu)
         self.title_bar_layout = QHBoxLayout(self.title_bar)
         self.title_bar_layout.setContentsMargins(0, 0, 0, 0)
         self.title_bar_layout.setSpacing(0)
@@ -458,8 +523,10 @@ class ViewMeshApp(QMainWindow):
         
         # Create menu bar (will be added to title bar)
         self.menu_bar = QMenuBar()
-        self.menu_bar.setMaximumHeight(22)  # Even smaller
-        self.menu_bar.setObjectName("main_menu_bar")
+        # self.menu_bar.setMaximumHeight(22) # Allow dynamic height based on font
+        self.menu_bar.setObjectName("title_bar_menu_bar_widget")
+        self.menu_bar.installEventFilter(self)
+        # print(f"Event filter installed on {self.menu_bar.objectName()} in setup_ui")
         self.menu_bar.setStyleSheet("""
             QMenuBar {
                 background-color: #1e1e1e;
@@ -480,7 +547,7 @@ class ViewMeshApp(QMainWindow):
         """)
         
         # Add menu bar to title bar (takes up stretch space)
-        self.title_bar_layout.addWidget(self.menu_bar, 1)  # Stretches to fill space
+        self.title_bar_layout.addWidget(self.menu_bar, 1)
         
         # Window control buttons
         button_size = 40  # Width reduced further
@@ -659,7 +726,7 @@ class ViewMeshApp(QMainWindow):
         # VS Code-like placeholder content
         welcome_label = QLabel("Welcome to ViewMesh")
         welcome_font = welcome_label.font()
-        welcome_font.setPointSize(14)
+        # welcome_font.setPointSize(14) # Allow inheritance or set relative
         welcome_font.setBold(True)
         welcome_label.setFont(welcome_font)
         welcome_label.setAlignment(Qt.AlignCenter)
@@ -712,8 +779,11 @@ class ViewMeshApp(QMainWindow):
         
         # Apply dark theme to match VS Code
         self.apply_vs_code_dark_theme()
+
+        # Set initial title bar height correctly after all elements and styles are applied
+        self._update_title_bar_height()
         
-        # Set border for frameless window
+        # Set border for frameless window (already present, ensure it's after height calc)
         self.setStyleSheet("""
             QMainWindow {
                 border: 1px solid #252526;
@@ -721,6 +791,61 @@ class ViewMeshApp(QMainWindow):
             }
         """)
     
+    def _update_title_bar_height(self):
+        """Calculates and sets the title bar height based on current menu bar font and content."""
+        # Ensure menu_bar's font is current (it should be if app font is set)
+        menu_bar_font = self.menu_bar.font()
+        
+        # Force style recomputation for menu_bar to update its sizeHint correctly
+        self.menu_bar.style().unpolish(self.menu_bar)
+        self.menu_bar.style().polish(self.menu_bar)
+        self.menu_bar.updateGeometry() 
+        # print(f"[DEBUG _update_title_bar_height] self.menu_bar unpolished, polished, updateGeometry called.")
+
+        menu_bar_natural_height = self.menu_bar.sizeHint().height()
+        # print(f"[DEBUG _update_title_bar_height] self.menu_bar.sizeHint().height(): {menu_bar_natural_height}")
+        # print(f"[DEBUG _update_title_bar_height] self.menu_bar minHeight: {self.menu_bar.minimumHeight()}, maxHeight: {self.menu_bar.maximumHeight()}")
+
+        title_bar_padding = 4 # e.g., 2px top, 2px bottom for the title_bar itself
+        calculated_title_bar_height = menu_bar_natural_height + title_bar_padding
+        
+        # Ensure calculated height is not less than the tallest fixed element (e.g., buttons)
+        min_control_height = self.minimize_button.height() # Assuming all buttons are same height
+        if calculated_title_bar_height < min_control_height + title_bar_padding:
+            # print(f"[DEBUG _update_title_bar_height] Calculated height ({calculated_title_bar_height}) < min control height. Adjusting.")
+            calculated_title_bar_height = min_control_height + title_bar_padding
+        
+        # print(f"[DEBUG _update_title_bar_height] Current self.title_bar.height() before setFixed: {self.title_bar.height()}")
+        self.title_bar.setFixedHeight(calculated_title_bar_height)
+        # print(f"[DEBUG _update_title_bar_height] self.title_bar.setFixedHeight({calculated_title_bar_height}) called.")
+        self.title_bar.adjustSize() # Tell the title bar to adjust its size
+
+    def _apply_global_font_change(self):
+        new_point_size = self.initial_app_font_point_size + self.global_font_size_adjust
+        if new_point_size <= 0: 
+            new_point_size = 1 
+        # print(f"[DEBUG] _apply_global_font_change: Adjust: {self.global_font_size_adjust}, InitialPt: {self.initial_app_font_point_size}, NewPt: {new_point_size}")
+
+        new_font = QFont(self.initial_app_font_family, new_point_size)
+        QApplication.setFont(new_font)
+        # print(f"[DEBUG] QApplication font set to pointSize: {QApplication.font().pointSize()}")
+
+        # The menu_bar should pick up the new QApplication font automatically.
+        # If its font was explicitly set before, ensure it follows app font or update it here too.
+        # Forcing its font for safety, though ideally it inherits from QApplication.font()
+        menu_bar_font_check = self.menu_bar.font()
+        if menu_bar_font_check.pointSize() != new_point_size:
+            menu_bar_font_check.setPointSize(new_point_size)
+            self.menu_bar.setFont(menu_bar_font_check)
+            # print(f"[DEBUG] self.menu_bar font explicitly set to pointSize: {self.menu_bar.font().pointSize()} in _apply_global_font_change")
+
+        self._update_title_bar_height() # Call the new method to set heights
+
+        self.apply_vs_code_dark_theme() 
+        self.update() 
+        QApplication.processEvents() 
+        # print(f"[DEBUG] After processEvents, self.title_bar.height(): {self.title_bar.height()}")
+
     def apply_vs_code_dark_theme(self):
         """Apply VS Code dark theme styling to all widgets."""
         # VS Code dark theme colors
@@ -866,333 +991,6 @@ class ViewMeshApp(QMainWindow):
         # Apply the style to all widgets except TabWidget which already has specific styling
         self.setStyleSheet(vs_code_style)
     
-    def mousePressEvent(self, event: QMouseEvent):
-        """Handle mouse press events for resizing and dragging the window."""
-        if not self.isMaximized():  # Only allow resize when not maximized
-            # Check for resize edge areas
-            direction = self.get_resize_direction(event.position().toPoint())
-            if direction:
-                self.resizing = True
-                self.resize_direction = direction
-                self.resize_start_position = event.globalPosition().toPoint()
-                self.resize_start_geometry = self.geometry()
-                self.setCursor(self.get_resize_cursor(direction))
-                event.accept()
-                return
-        
-        # Check if we're in the title bar area for dragging
-        if self.title_bar.underMouse() and event.button() == Qt.LeftButton:
-            # Only start dragging if we're not clicking a child widget in the title bar
-            # that handles its own mouse events (like menu items)
-            for child in self.title_bar.findChildren(QWidget):
-                if child.isVisible() and child.geometry().contains(event.position().toPoint() - self.title_bar.pos()):
-                    if isinstance(child, QMenuBar) or isinstance(child, QPushButton):
-                        # Let menu bar and buttons handle their own events
-                        return super().mousePressEvent(event)
-                    
-            # Start dragging
-            self.dragging = True
-            self.drag_start_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
-            return
-            
-        super().mousePressEvent(event)
-    
-    def mouseReleaseEvent(self, event: QMouseEvent):
-        """Handle mouse release events for resizing and dragging the window."""
-        if self.resizing:
-            self.resizing = False
-            self.resize_direction = None
-            self.setCursor(Qt.ArrowCursor)
-            event.accept()
-            return
-        
-        if self.dragging:
-            self.dragging = False
-            event.accept()
-            return
-        
-        super().mouseReleaseEvent(event)
-    
-    def mouseMoveEvent(self, event: QMouseEvent):
-        """Handle mouse move events for resizing and dragging the window."""
-        if not self.isMaximized():  # Only allow resize/drag when not maximized
-            if self.resizing and self.resize_direction:
-                # Calculate new geometry based on resize direction and mouse position
-                diff = event.globalPosition().toPoint() - self.resize_start_position
-                new_geometry = QRect(self.resize_start_geometry)
-                
-                # Adjust geometry based on resize direction
-                if 'left' in self.resize_direction:
-                    new_geometry.setLeft(self.resize_start_geometry.left() + diff.x())
-                if 'top' in self.resize_direction:
-                    new_geometry.setTop(self.resize_start_geometry.top() + diff.y())
-                if 'right' in self.resize_direction:
-                    new_geometry.setRight(self.resize_start_geometry.right() + diff.x())
-                if 'bottom' in self.resize_direction:
-                    new_geometry.setBottom(self.resize_start_geometry.bottom() + diff.y())
-                
-                # Apply new geometry if it's valid
-                if new_geometry.width() >= self.minimumWidth() and new_geometry.height() >= self.minimumHeight():
-                    self.setGeometry(new_geometry)
-                event.accept()
-                return
-            elif self.dragging and event.buttons() & Qt.LeftButton:
-                # Move the window when dragging the title bar
-                self.move(event.globalPosition().toPoint() - self.drag_start_position)
-                event.accept()
-                return
-            else:
-                # Update cursor based on mouse position for resize areas
-                direction = self.get_resize_direction(event.position().toPoint())
-                if direction:
-                    self.setCursor(self.get_resize_cursor(direction))
-                else:
-                    self.setCursor(Qt.ArrowCursor)
-        
-        super().mouseMoveEvent(event)
-    
-    def mouseDoubleClickEvent(self, event: QMouseEvent):
-        """Handle double-click events on the title bar to maximize/restore."""
-        if self.title_bar.underMouse() and event.button() == Qt.LeftButton:
-            # Make sure we're not double-clicking a specific control in the title bar
-            for child in self.title_bar.findChildren(QWidget):
-                if child.isVisible() and child.geometry().contains(event.position().toPoint() - self.title_bar.pos()):
-                    if isinstance(child, QMenuBar) or isinstance(child, QPushButton):
-                        # Let menu bar and buttons handle their own events
-                        return super().mouseDoubleClickEvent(event)
-            
-            # Toggle maximize state
-            self.toggle_maximize()
-            event.accept()
-            return
-        
-        super().mouseDoubleClickEvent(event)
-    
-    def get_resize_direction(self, pos: QPoint) -> str:
-        """Get the resize direction based on mouse position."""
-        if not self.isMaximized():  # Only allow resize when not maximized
-            rect = self.rect()
-            padding = self.resize_padding
-            
-            # Check left edge
-            if pos.x() <= padding:
-                if pos.y() <= padding:
-                    return 'top-left'
-                elif pos.y() >= rect.height() - padding:
-                    return 'bottom-left'
-                else:
-                    return 'left'
-            
-            # Check right edge
-            elif pos.x() >= rect.width() - padding:
-                if pos.y() <= padding:
-                    return 'top-right'
-                elif pos.y() >= rect.height() - padding:
-                    return 'bottom-right'
-                else:
-                    return 'right'
-            
-            # Check top edge
-            elif pos.y() <= padding:
-                return 'top'
-            
-            # Check bottom edge
-            elif pos.y() >= rect.height() - padding:
-                return 'bottom'
-        
-        return ''
-
-    def get_resize_cursor(self, direction: str) -> Qt.CursorShape:
-        """Get the cursor shape for the resize direction."""
-        if direction in ('top-left', 'bottom-right'):
-            return Qt.SizeFDiagCursor
-        elif direction in ('top-right', 'bottom-left'):
-            return Qt.SizeBDiagCursor
-        elif direction in ('left', 'right'):
-            return Qt.SizeHorCursor
-        elif direction in ('top', 'bottom'):
-            return Qt.SizeVerCursor
-        return Qt.ArrowCursor
-
-    def toggle_maximize(self):
-        """Toggle maximize/restore window state."""
-        if self.isMaximized():
-            self.showNormal()
-            self.maximize_button.setText("□")
-        else:
-            self.showMaximized()
-            self.maximize_button.setText("❐")
-    
-    def setup_menu_items(self):
-        """Set up the menu bar items."""
-        # File menu
-        self.file_menu = self.menu_bar.addMenu("&File")
-        
-        # New file action
-        new_file_action = QAction("&New File", self)
-        new_file_action.setShortcut(QKeySequence.New)
-        new_file_action.triggered.connect(self.on_new_file)
-        self.file_menu.addAction(new_file_action)
-        
-        # Open file action
-        open_file_action = QAction("&Open File...", self)
-        open_file_action.setShortcut(QKeySequence.Open)
-        open_file_action.triggered.connect(self.on_open_file)
-        self.file_menu.addAction(open_file_action)
-        
-        # Open folder action
-        open_folder_action = QAction("Open F&older...", self)
-        open_folder_action.triggered.connect(self.on_open_folder)
-        self.file_menu.addAction(open_folder_action)
-        
-        self.file_menu.addSeparator()
-        
-        # Save action
-        save_action = QAction("&Save", self)
-        save_action.setShortcut(QKeySequence.Save)
-        save_action.triggered.connect(self.on_save)
-        self.file_menu.addAction(save_action)
-        
-        # Save as action
-        save_as_action = QAction("Save &As...", self)
-        save_as_action.setShortcut(QKeySequence.SaveAs)
-        save_as_action.triggered.connect(self.on_save_as)
-        self.file_menu.addAction(save_as_action)
-        
-        self.file_menu.addSeparator()
-        
-        # Preferences submenu (VS Code style)
-        preferences_menu = self.file_menu.addMenu("&Preferences")
-        
-        # Settings action
-        settings_action = QAction("&Settings", self)
-        settings_action.setShortcut("Ctrl+,")
-        preferences_menu.addAction(settings_action)
-        
-        # Color Theme action
-        color_theme_action = QAction("Color &Theme", self)
-        preferences_menu.addAction(color_theme_action)
-        
-        self.file_menu.addSeparator()
-        
-        # Exit action
-        exit_action = QAction("E&xit", self)
-        exit_action.setShortcut(QKeySequence.Quit)
-        exit_action.triggered.connect(self.close)
-        self.file_menu.addAction(exit_action)
-        
-        # Edit menu
-        self.edit_menu = self.menu_bar.addMenu("&Edit")
-        
-        # Undo action
-        undo_action = QAction("&Undo", self)
-        undo_action.setShortcut(QKeySequence.Undo)
-        self.edit_menu.addAction(undo_action)
-        
-        # Redo action
-        redo_action = QAction("&Redo", self)
-        redo_action.setShortcut(QKeySequence.Redo)
-        self.edit_menu.addAction(redo_action)
-        
-        self.edit_menu.addSeparator()
-        
-        # Cut action
-        cut_action = QAction("Cu&t", self)
-        cut_action.setShortcut(QKeySequence.Cut)
-        self.edit_menu.addAction(cut_action)
-        
-        # Copy action
-        copy_action = QAction("&Copy", self)
-        copy_action.setShortcut(QKeySequence.Copy)
-        self.edit_menu.addAction(copy_action)
-        
-        # Paste action
-        paste_action = QAction("&Paste", self)
-        paste_action.setShortcut(QKeySequence.Paste)
-        self.edit_menu.addAction(paste_action)
-        
-        self.edit_menu.addSeparator()
-        
-        # Find action (VS Code style)
-        find_action = QAction("&Find", self)
-        find_action.setShortcut(QKeySequence.Find)
-        self.edit_menu.addAction(find_action)
-        
-        # Replace action
-        replace_action = QAction("&Replace", self)
-        replace_action.setShortcut(QKeySequence.Replace)
-        self.edit_menu.addAction(replace_action)
-        
-        # View menu (VS Code style)
-        self.view_menu = self.menu_bar.addMenu("&View")
-        
-        # Command Palette action
-        cmd_palette_action = QAction("&Command Palette...", self)
-        cmd_palette_action.setShortcut("Ctrl+Shift+P")
-        self.view_menu.addAction(cmd_palette_action)
-        
-        self.view_menu.addSeparator()
-        
-        # Appearance submenu
-        appearance_menu = self.view_menu.addMenu("&Appearance")
-        
-        # Full Screen action
-        full_screen_action = QAction("&Full Screen", self)
-        full_screen_action.setShortcut("F11")
-        appearance_menu.addAction(full_screen_action)
-        
-        # Zoom In action
-        zoom_in_action = QAction("Zoom &In", self)
-        zoom_in_action.setShortcut(QKeySequence.ZoomIn)
-        appearance_menu.addAction(zoom_in_action)
-        
-        # Zoom Out action
-        zoom_out_action = QAction("Zoom &Out", self)
-        zoom_out_action.setShortcut(QKeySequence.ZoomOut)
-        appearance_menu.addAction(zoom_out_action)
-        
-        self.view_menu.addSeparator()
-        
-        # Explorer action
-        toggle_explorer_action = QAction("&Explorer", self)
-        toggle_explorer_action.setCheckable(True)
-        toggle_explorer_action.setChecked(True)
-        toggle_explorer_action.triggered.connect(self.toggle_explorer)
-        self.view_menu.addAction(toggle_explorer_action)
-        
-        # Search action
-        toggle_search_action = QAction("&Search", self)
-        toggle_search_action.setCheckable(True)
-        toggle_search_action.setChecked(False)
-        self.view_menu.addAction(toggle_search_action)
-        
-        # Run menu (VS Code style)
-        self.run_menu = self.menu_bar.addMenu("&Run")
-        
-        # Start action
-        start_action = QAction("&Start", self)
-        start_action.setShortcut("F5")
-        self.run_menu.addAction(start_action)
-        
-        # Help menu
-        self.help_menu = self.menu_bar.addMenu("&Help")
-        
-        # Get Started action
-        get_started_action = QAction("&Get Started", self)
-        self.help_menu.addAction(get_started_action)
-        
-        # Documentation action
-        docs_action = QAction("&Documentation", self)
-        self.help_menu.addAction(docs_action)
-        
-        self.help_menu.addSeparator()
-        
-        # About action
-        about_action = QAction("&About", self)
-        about_action.triggered.connect(self.on_about)
-        self.help_menu.addAction(about_action)
-    
     def setup_async_loop(self):
         """Set up the asyncio event loop and integrate with PySide6."""
         self.loop = asyncio.new_event_loop()
@@ -1300,6 +1098,12 @@ class ViewMeshApp(QMainWindow):
         # Restore complete window state if available
         if self.config.settings.state:
             self.restoreState(self.config.settings.state)
+        
+        # Restore initial directory
+        self.explorer.initial_dir = self.config.initial_dir
+        
+        # Save configuration
+        self.config.save()
     
     def save_window_state(self):
         """Save the current window state to the configuration."""
@@ -1335,14 +1139,15 @@ class ViewMeshApp(QMainWindow):
                     
                     self.config.settings.relative_position = (rel_x, rel_y)
                 
-                print(f"Window position: {abs_x},{abs_y}")
-                print(f"Window relative position: {self.config.settings.relative_position[0]:.2f},{self.config.settings.relative_position[1]:.2f}")
-                print(f"Window size: {self.width()},{self.height()}")
+                # print(f"Window position: {abs_x},{abs_y}")
+                # print(f"Window relative position: {self.config.settings.relative_position[0]:.2f},{self.config.settings.relative_position[1]:.2f}")
+                # print(f"Window size: {self.width()},{self.height()}")
         
         self.config.settings.is_maximized = self.isMaximized()
         self.config.settings.explorer_width = self.explorer_dock.width()
         self.config.settings.state = self.saveState()
         self.config.initial_dir = self.explorer.initial_dir
+        self.config.settings.global_font_size_adjust = self.global_font_size_adjust # Save current adjustment
         
         # Save configuration
         self.config.save()
@@ -1455,6 +1260,507 @@ class ViewMeshApp(QMainWindow):
         self.status_message.setStyleSheet("padding: 3px 8px;")
         self.status_bar.addWidget(self.status_message)
 
+    def show_title_bar_context_menu(self, pos):
+        """Show context menu for the title bar when right-clicked."""
+        context_menu = QMenu(self)
+        
+        restore_action = None
+        maximize_action = None
+
+        if self.isMaximized():
+            restore_action = context_menu.addAction("Restore")
+        else:
+            maximize_action = context_menu.addAction("Maximize")
+        
+        move_action = context_menu.addAction("Move")
+        
+        size_action = None
+        if not self.isMaximized():
+            size_action = context_menu.addAction("Size")
+        
+        context_menu.addSeparator()
+        
+        app_menu = context_menu.addMenu("ViewMesh")
+        open_file_action = app_menu.addAction("Open File...")
+        open_folder_action = app_menu.addAction("Open Folder...")
+        app_menu.addSeparator()
+        settings_action = app_menu.addAction("Settings")
+        
+        context_menu.addSeparator()
+        minimize_action = context_menu.addAction("Minimize")
+        context_menu.addSeparator()
+        close_action = context_menu.addAction("Close")
+        
+        # Map position to global for exec()
+        action = context_menu.exec(self.title_bar.mapToGlobal(pos))
+        
+        if action:
+            if restore_action and action == restore_action:
+                self.showNormal()
+                self.maximize_button.setText("□")
+            elif maximize_action and action == maximize_action:
+                self.showMaximized()
+                self.maximize_button.setText("❐")
+            elif action == move_action:
+                # print("Context Menu: Activating manual move mode (timer-based).")
+                self.is_context_menu_moving = True
+                self.context_menu_drag_start_position = QCursor.pos()
+                self.context_menu_window_start_position = self.pos()
+                QApplication.setOverrideCursor(Qt.SizeAllCursor) 
+                self.context_move_timer.start()
+                self.grabMouse() # Grab all mouse events for the window
+                # print("Context Menu: Mouse grabbed.")
+            elif size_action and action == size_action:
+                if sys.platform == "win32" and self.SendMessage and self.ReleaseCapture:
+                    try:
+                        # print("Context Menu: Attempting resize with WM_SYSCOMMAND | SC_SIZE (BottomRight)")
+                        self.ReleaseCapture()
+                        self.SendMessage(int(self.winId()), 0x0112, 0xF008, 0) # WM_SYSCOMMAND, SC_SIZE + WMSZ_BOTTOMRIGHT
+                    except Exception as e:
+                        print(f"Error initiating system resize from context menu with WM_SYSCOMMAND: {e}") # Keep error prints
+            elif action == minimize_action:
+                self.showMinimized()
+            elif action == close_action:
+                self.close()
+            elif action == open_file_action: self.on_open_file()
+            elif action == open_folder_action: self.on_open_folder()
+            elif action == settings_action: self.showMessage("Settings not implemented yet")
+
+    def mousePressEvent(self, event: QMouseEvent):
+        """Handle mouse press events for window dragging and terminating context menu move."""
+        if self.is_context_menu_moving:
+            # print("mousePressEvent: Click received, terminating timer-based context menu move mode.")
+            self.context_move_timer.stop() 
+            self.is_context_menu_moving = False
+            self.releaseMouse() # Release the mouse grab
+            QApplication.restoreOverrideCursor() 
+            # print("mousePressEvent: Mouse released and cursor restored.")
+            event.accept() 
+            return
+
+        if event.button() == Qt.LeftButton:
+            # print(f"mousePressEvent: Left button pressed at global {event.globalPosition().toPoint()}")
+            
+            # Debugging coordinate systems:
+            # print(f"mousePressEvent: self (QMainWindow).pos(): {self.pos()}")
+            # print(f"mousePressEvent: self.central_widget.pos() (rel to QMainWindow client area): {self.central_widget.pos()}")
+            # print(f"mousePressEvent: self.title_bar.pos() (rel to central_widget): {self.title_bar.pos()}")
+            # mapped_global_title_bar_origin = self.title_bar.mapToGlobal(QPoint(0,0))
+            # print(f"mousePressEvent: self.title_bar.mapToGlobal(QPoint(0,0)): {mapped_global_title_bar_origin}")
+
+            title_bar_global_rect = QRect(self.title_bar.mapToGlobal(QPoint(0,0)), self.title_bar.size())
+            event_global_pos = event.globalPosition().toPoint()
+            # print(f"mousePressEvent: Title bar global rect: {title_bar_global_rect}, Event global pos: {event_global_pos}")
+
+            if title_bar_global_rect.contains(event_global_pos) and self.title_bar.isVisible():
+                # print("mousePressEvent: Click is within title bar global rect and title bar is visible.")
+                
+                on_control = False
+                for child_widget in self.title_bar.findChildren(QWidget):
+                    if not child_widget.isVisible():
+                        continue
+                    
+                    child_global_origin = child_widget.mapToGlobal(QPoint(0,0))
+                    child_global_rect = QRect(child_global_origin, child_widget.size())
+                    # print(f"mousePressEvent: Checking child {child_widget.objectName()} ({type(child_widget)}) at global rect {child_global_rect}")
+
+                    if child_global_rect.contains(event_global_pos):
+                        # print(f"mousePressEvent: Click was on child {child_widget.objectName()}")
+                        if isinstance(child_widget, QPushButton):
+                            # print(f"mousePressEvent: Child {child_widget.objectName()} is a QPushButton. Passing event.")
+                            on_control = True
+                            break 
+                        elif child_widget == self.menu_bar: 
+                            local_pos_in_menubar = self.menu_bar.mapFromGlobal(event_global_pos)
+                            active_action = self.menu_bar.actionAt(local_pos_in_menubar)
+                            if active_action:
+                                # print(f"mousePressEvent: Click was on an active action ('{active_action.text()}') in the QMenuBar. Passing event.")
+                                on_control = True
+                            # else:
+                                # print(f"mousePressEvent: Click was on the QMenuBar background, not an action. Allowing drag.")
+                                
+                            break 
+                
+                if not on_control:
+                    # print("mousePressEvent: Click was not on a defined control (or on menu bar background). Attempting system drag.")
+                    if sys.platform == "win32" and self.SendMessage and self.ReleaseCapture:
+                        try:
+                            # print("Attempting drag with WM_SYSCOMMAND | SC_MOVE") 
+                            self.ReleaseCapture()
+                            self.SendMessage(int(self.winId()), 0x0112, 0xF012, 0)
+                            event.accept()
+                            return 
+                        except Exception as e:
+                            print(f"Error initiating system drag with WM_SYSCOMMAND: {e}") # Keep error print
+                            self.dragging = True
+                            self.drag_start_position = event.globalPosition().toPoint()
+                            self.window_start_position = self.pos()
+                            event.accept()
+                            return
+                    else:
+                        # print("mousePressEvent: Fallback to manual drag.")
+                        self.dragging = True
+                        self.drag_start_position = event.globalPosition().toPoint()
+                        self.window_start_position = self.pos()
+                        event.accept()
+                        return
+                # else:
+                    # print("mousePressEvent: Click was on a defined control (QPushButton or QMenuBar action), not starting drag.")
+            # else:
+                # print(f"mousePressEvent: Click NOT in title bar global rect OR title bar not visible. Title bar visible: {self.title_bar.isVisible()}")
+        
+        # print("mousePressEvent: Event not handled for dragging, passing to super().")
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        """Handle mouse move events for window dragging (manual fallback).""" 
+        # print(f"mouseMoveEvent entered. QCursor.pos(): {QCursor.pos()}, buttons: {event.buttons()}")
+
+        if self.dragging and event.buttons() & Qt.LeftButton:
+            delta = event.globalPosition().toPoint() - self.drag_start_position
+            new_pos = self.window_start_position + delta
+            self.move(new_pos)
+            event.accept()
+            return
+        
+        # For non-Windows platforms, or if nativeEvent-based resizing isn't active,
+        # set resize cursors manually.
+        if not self.isMaximized():
+            if sys.platform != "win32": # Primarily for non-Windows
+                pos = event.position().toPoint()
+                direction = self.get_resize_direction(pos)
+                if direction:
+                    self.setCursor(self.get_resize_cursor(direction))
+                else:
+                    self.setCursor(Qt.ArrowCursor)
+            elif not self.ReleaseCapture: # Or if WinAPI calls are not available as a fallback
+                pos = event.position().toPoint()
+                direction = self.get_resize_direction(pos)
+                if direction:
+                    self.setCursor(self.get_resize_cursor(direction))
+                else:
+                    self.setCursor(Qt.ArrowCursor)
+            else: # On Windows with API, usually OS handles cursors via WM_NCHITTEST
+                self.setCursor(Qt.ArrowCursor) # Default unless nativeEvent overrides
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        """Handle mouse release events for window dragging (manual fallback)."""
+        if event.button() == Qt.LeftButton and self.dragging:
+            self.dragging = False
+            self.drag_start_position = None
+            self.window_start_position = None
+            self.setCursor(Qt.ArrowCursor) # Reset cursor
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def get_resize_direction(self, pos: QPoint) -> str:
+        """Get the resize direction based on mouse position."""
+        if self.isMaximized(): return '' # No resize if maximized
+        rect = self.rect()
+        padding = self.resize_padding
+        
+        on_left = pos.x() >= 0 and pos.x() <= padding
+        on_right = pos.x() >= rect.width() - padding and pos.x() <= rect.width()
+        on_top = pos.y() >=0 and pos.y() <= padding
+        on_bottom = pos.y() >= rect.height() - padding and pos.y() <= rect.height()
+
+        if on_top and on_left: return 'top-left'
+        if on_bottom and on_left: return 'bottom-left'
+        if on_top and on_right: return 'top-right'
+        if on_bottom and on_right: return 'bottom-right'
+        if on_left: return 'left'
+        if on_right: return 'right'
+        if on_top: return 'top'
+        if on_bottom: return 'bottom'
+        return ''
+
+    def get_resize_cursor(self, direction: str) -> Qt.CursorShape:
+        """Get the cursor shape for the resize direction."""
+        if direction in ('top-left', 'bottom-right'): return Qt.SizeFDiagCursor
+        if direction in ('top-right', 'bottom-left'): return Qt.SizeBDiagCursor
+        if direction in ('left', 'right'): return Qt.SizeHorCursor
+        if direction in ('top', 'bottom'): return Qt.SizeVerCursor
+        return Qt.ArrowCursor
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent):
+        """Handle double-click events for title bar maximize/restore."""
+        if event.button() == Qt.LeftButton:
+            global_title_bar_pos = self.title_bar.mapToGlobal(QPoint(0,0))
+            local_event_pos_in_title_bar = self.title_bar.mapFromGlobal(event.globalPosition().toPoint())
+
+            if self.title_bar.rect().contains(local_event_pos_in_title_bar) and self.title_bar.isVisible():
+                on_control = False
+                for child_widget in self.title_bar.findChildren(QWidget):
+                    if child_widget.isVisible() and child_widget.rect().contains(child_widget.mapFromGlobal(event.globalPosition().toPoint())):
+                        if isinstance(child_widget, (QPushButton, QMenuBar)):
+                            on_control = True
+                            break
+                
+                if not on_control:
+                    self.toggle_maximize()
+                    event.accept()
+                    return
+        super().mouseDoubleClickEvent(event)
+
+    def nativeEvent(self, eventType, message):
+        """Handle native window events for window resizing (Windows)."""
+        if sys.platform == "win32" and not self.isMaximized():
+            try:
+                msg_ptr = int(message)
+            except (TypeError, ValueError):
+                return super().nativeEvent(eventType, message)
+
+            msg = ctypes.c_uint.from_address(msg_ptr).value
+            
+            if msg == 0x0084:  # WM_NCHITTEST
+                cursor_pos = QCursor.pos()
+                local_pos = self.mapFromGlobal(cursor_pos)
+                
+                x = local_pos.x()
+                y = local_pos.y()
+                w = self.width()
+                h = self.height()
+                # Determine title bar rect in local QMainWindow coordinates
+                # title_bar_local_y_end = self.title_bar.mapTo(self, self.title_bar.rect().bottomRight()).y()
+                # A simpler way: title_bar height is fixed
+                title_bar_height = self.title_bar.height() 
+
+                p = self.resize_padding # For resize borders
+                ht_result = 0
+
+                # Check resize borders first
+                if x >= 0 and x < p and y >= 0 and y < p: ht_result = 13 # HTTOPLEFT
+                elif x > w - p and x <= w and y >= 0 and y < p: ht_result = 14 # HTTOPRIGHT
+                elif x >= 0 and x < p and y > h - p and y <= h: ht_result = 16 # HTBOTTOMLEFT
+                elif x > w - p and x <= w and y > h - p and y <= h: ht_result = 17 # HTBOTTOMRIGHT
+                elif x >= 0 and x < p: ht_result = 10 # HTLEFT
+                elif x > w - p and x <= w: ht_result = 11 # HTRIGHT
+                elif y >= 0 and y < p: ht_result = 12 # HTTOP
+                elif y > h - p and y <= h: ht_result = 15 # HTBOTTOM
+                # Now check for title bar (caption) area if not a resize border
+                # Ensure this check doesn't overlap with controls on the title bar; 
+                # that distinction should be made in mousePressEvent.
+                # nativeEvent is for telling Windows what *kind* of area the mouse is over.
+                elif y > p and y < title_bar_height: # Click is below top resize border and within title bar height
+                    ht_result = 2 # HTCAPTION
+                
+                if ht_result != 0:
+                    # print(f"nativeEvent (WM_NCHITTEST) at local_pos ({x},{y}): Returning ht_result: {ht_result}")
+                    return True, ht_result
+                else:
+                    # If not on border or our defined title bar area for HTCAPTION, let it be HTCLIENT or default
+                    # print(f"nativeEvent (WM_NCHITTEST) at local_pos ({x},{y}): No specific ht_result, passing to super.")
+                    pass # Fall through to super
+
+        result = super().nativeEvent(eventType, message)
+        # print(f"nativeEvent: type={eventType}, super_handled={result[0] if isinstance(result, tuple) else result}, super_result={result[1] if isinstance(result, tuple) and len(result) > 1 else None}")
+        return result
+
+    def toggle_maximize(self):
+        """Toggle maximize/restore window state."""
+        if self.isMaximized():
+            self.showNormal()
+            self.maximize_button.setText("□") # Update button text
+        else:
+            self.showMaximized()
+            self.maximize_button.setText("❐") # Update button text
+    
+    def setup_menu_items(self):
+        # File Menu
+        file_menu = self.menu_bar.addMenu("&File")
+
+        new_action = QAction("&New", self)
+        new_action.setShortcut(QKeySequence.New)
+        new_action.triggered.connect(self.on_new_file)
+        file_menu.addAction(new_action)
+
+        open_file_action = QAction("&Open File...", self)
+        open_file_action.setShortcut(QKeySequence.Open)
+        open_file_action.triggered.connect(self.on_open_file)
+        file_menu.addAction(open_file_action)
+
+        open_folder_action = QAction("Open &Folder...", self)
+        # No standard shortcut, but often Ctrl+K Ctrl+O or similar in VS Code like apps
+        open_folder_action.triggered.connect(self.on_open_folder)
+        file_menu.addAction(open_folder_action)
+
+        file_menu.addSeparator()
+
+        save_action = QAction("&Save", self)
+        save_action.setShortcut(QKeySequence.Save)
+        save_action.triggered.connect(self.on_save)
+        file_menu.addAction(save_action)
+
+        save_as_action = QAction("Save &As...", self)
+        save_as_action.setShortcut(QKeySequence.SaveAs)
+        save_as_action.triggered.connect(self.on_save_as)
+        file_menu.addAction(save_as_action)
+
+        file_menu.addSeparator()
+
+        exit_action = QAction("E&xit", self)
+        exit_action.setShortcut(QKeySequence.Quit)
+        exit_action.triggered.connect(self.close) # Connect to QMainWindow.close
+        file_menu.addAction(exit_action)
+
+        # Edit Menu (placeholders for now)
+        edit_menu = self.menu_bar.addMenu("&Edit")
+
+        undo_action = QAction("&Undo", self)
+        undo_action.setShortcut(QKeySequence.Undo)
+        undo_action.triggered.connect(lambda: self.showMessage("Undo not implemented"))
+        edit_menu.addAction(undo_action)
+
+        redo_action = QAction("&Redo", self)
+        redo_action.setShortcut(QKeySequence.Redo)
+        redo_action.triggered.connect(lambda: self.showMessage("Redo not implemented"))
+        edit_menu.addAction(redo_action)
+
+        edit_menu.addSeparator()
+
+        cut_action = QAction("Cu&t", self)
+        cut_action.setShortcut(QKeySequence.Cut)
+        cut_action.triggered.connect(lambda: self.showMessage("Cut not implemented"))
+        edit_menu.addAction(cut_action)
+
+        copy_action = QAction("&Copy", self)
+        copy_action.setShortcut(QKeySequence.Copy)
+        copy_action.triggered.connect(lambda: self.showMessage("Copy not implemented"))
+        edit_menu.addAction(copy_action)
+
+        paste_action = QAction("&Paste", self)
+        paste_action.setShortcut(QKeySequence.Paste)
+        paste_action.triggered.connect(lambda: self.showMessage("Paste not implemented"))
+        edit_menu.addAction(paste_action)
+
+        # View Menu
+        view_menu = self.menu_bar.addMenu("&View")
+
+        self.toggle_explorer_action = QAction("Toggle &Explorer", self)
+        self.toggle_explorer_action.setCheckable(True)
+        self.toggle_explorer_action.setChecked(self.explorer_dock.isVisible())
+        self.toggle_explorer_action.triggered.connect(self.toggle_explorer)
+        view_menu.addAction(self.toggle_explorer_action)
+        # Keep action state in sync if explorer is closed by other means (e.g., context menu, 'x' button on dock)
+        self.explorer_dock.visibilityChanged.connect(self.toggle_explorer_action.setChecked)
+
+        toggle_fullscreen_action = QAction("Toggle &Fullscreen", self)
+        toggle_fullscreen_action.setShortcut(QKeySequence.FullScreen)
+        toggle_fullscreen_action.triggered.connect(self.toggle_fullscreen)
+        # Make it checkable to reflect state
+        toggle_fullscreen_action.setCheckable(True)
+        toggle_fullscreen_action.setChecked(self.isFullScreen())
+        view_menu.addAction(toggle_fullscreen_action)
+
+        view_menu.addSeparator()
+
+        increase_font_action = QAction("Increase Font Size", self)
+        # Using Ctrl+Shift+Plus (often on the same key as Equals)
+        increase_font_action.setShortcut(QKeySequence(Qt.CTRL | Qt.SHIFT | Qt.Key_Equal))
+        increase_font_action.triggered.connect(self.increase_font_size)
+        view_menu.addAction(increase_font_action)
+        self.addAction(increase_font_action) 
+
+        decrease_font_action = QAction("Decrease Font Size", self)
+        decrease_font_action.setShortcut(QKeySequence(Qt.CTRL | Qt.SHIFT | Qt.Key_Minus))
+        decrease_font_action.triggered.connect(self.decrease_font_size)
+        view_menu.addAction(decrease_font_action)
+        self.addAction(decrease_font_action)
+
+        # Help Menu
+        help_menu = self.menu_bar.addMenu("&Help")
+
+        about_action = QAction("&About ViewMesh", self)
+        about_action.triggered.connect(self.on_about)
+        help_menu.addAction(about_action)
+
+    def increase_font_size(self):
+        print("increase_font_size called") # Debug
+        self.global_font_size_adjust += 1
+        self._apply_global_font_change()
+
+    def decrease_font_size(self):
+        print("decrease_font_size called") # Debug
+        # Prevent font size from becoming too small or negative
+        if (self.initial_app_font_point_size + self.global_font_size_adjust) > 1:
+            self.global_font_size_adjust -= 1
+            self._apply_global_font_change()
+        else:
+            print("decrease_font_size: Font size too small to decrease further.") # Debug
+
+    def _perform_context_menu_move(self):
+        if not self.is_context_menu_moving:
+            return
+
+        current_mouse_pos = QCursor.pos()
+        delta = current_mouse_pos - self.context_menu_drag_start_position
+        new_pos = self.context_menu_window_start_position + delta
+        self.move(new_pos)
+
+    def toggle_fullscreen(self):
+        if self.isFullScreen():
+            self.showNormal()
+            # Update maximize button if we came from maximized state before fullscreen
+            if self.was_maximized_before_fullscreen:
+                self.maximize_button.setText("❐")
+            else:
+                self.maximize_button.setText("□")
+        else:
+            self.was_maximized_before_fullscreen = self.isMaximized()
+            self.showFullScreen()
+        # Update the check state of the menu action
+        # Assuming the action is stored or can be found. For now, let's find it.
+        for action in self.menu_bar.findChildren(QAction):
+            if action.text() == "Toggle &Fullscreen":
+                action.setChecked(self.isFullScreen())
+                break
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        # Check for stopping context menu move first, as this should be global
+        if self.is_context_menu_moving and event.type() == QEvent.Type.MouseButtonPress:
+            # This event is a QMouseEvent, need to cast to access button()
+            # However, any mouse button press should stop the mode.
+            # print(f"eventFilter: MouseButtonPress detected during context_menu_moving. Stopping move.")
+            self.context_move_timer.stop()
+            self.is_context_menu_moving = False
+            self.releaseMouse() # Release the mouse grab
+            QApplication.restoreOverrideCursor()
+            # print("eventFilter: Mouse released and cursor restored.")
+            # Consume the event to prevent the underlying widget from processing it
+            # (e.g., QTabWidget trying to change tabs on the click that stops the move)
+            return True # Event handled
+
+        # Existing eventFilter logic for logging and menu bar dragging
+        if event.type() == QEvent.Type.MouseButtonPress:
+            mouse_event = event # PySide6 handles the cast from QEvent to QMouseEvent here
+            watched_name = watched.objectName() if watched.objectName() else type(watched).__name__
+            button_name = "Unknown"
+            if mouse_event.button() == Qt.MouseButton.LeftButton: button_name = "LeftButton"
+            elif mouse_event.button() == Qt.MouseButton.RightButton: button_name = "RightButton"
+            elif mouse_event.button() == Qt.MouseButton.MiddleButton: button_name = "MiddleButton"
+            
+            # print(f"eventFilter on '{watched_name}': MouseButtonPress, button: {button_name}, globalPos: {mouse_event.globalPosition().toPoint()}")
+
+            # If the event is a left-click on the menu_bar, forward it to the main mousePressEvent
+            # This is for allowing drag on the menubar background when it has no active action
+            if watched == self.menu_bar and mouse_event.button() == Qt.MouseButton.LeftButton:
+                # print(f"eventFilter: Forwarding MouseButtonPress on '{watched_name}' to self.mousePressEvent for potential drag")
+                # Call the main handler. Note: mousePressEvent itself checks for is_context_menu_moving first.
+                # If we are here, is_context_menu_moving was false, so this is for title bar drag.
+                self.mousePressEvent(mouse_event) 
+                
+                if mouse_event.isAccepted():
+                    # print(f"eventFilter: self.mousePressEvent accepted the event for '{watched_name}'. Returning True.")
+                    return True # Event was handled (e.g., for dragging)
+                else:
+                    # print(f"eventFilter: self.mousePressEvent did NOT accept the event for '{watched_name}'. Returning False to allow widget's own processing.")
+                    return False # Event not handled by drag logic, let the original widget (menu_bar) process it
+        
+        return False
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="ViewMesh application")
@@ -1502,7 +1808,7 @@ def main():
     /* Global application style */
     QWidget {{
         font-family: {system_font_family};
-        font-size: {system_font_size}pt;
+        /* font-size: {system_font_size}pt; */ /* Commented out to allow QApplication.setFont to control base size */
         color: #333333;
         background-color: #ffffff;
     }}
