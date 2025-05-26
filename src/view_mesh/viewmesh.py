@@ -24,6 +24,188 @@ from PySide6.QtGui import (
     QMouseEvent, QColor, QPalette, QResizeEvent, QPainter, QCursor, QFontMetrics
 )
 
+# Define an Enum for handle positions
+import enum
+class HandlePosition(enum.Enum):
+    TOP_LEFT = 0
+    TOP = 1
+    TOP_RIGHT = 2
+    LEFT = 3
+    RIGHT = 4
+    BOTTOM_LEFT = 5
+    BOTTOM = 6
+    BOTTOM_RIGHT = 7
+
+class EdgeResizeHandle(QWidget):
+    def __init__(self, parent_window: QMainWindow, position: HandlePosition, thickness: int = 5):
+        super().__init__(parent_window) # Parent is the main window
+        self.parent_window = parent_window
+        self.position = position
+        self.thickness = thickness
+        self.setMouseTracking(True)
+        # self.setAttribute(Qt.WA_StyledBackground, True) # May not be needed with direct stylesheet
+
+        # For debugging, give it a color via stylesheet:
+        # debug_colors = {
+        #     HandlePosition.TOP_LEFT: "red",
+        #     HandlePosition.TOP: "blue",
+        #     HandlePosition.TOP_RIGHT: "magenta",
+        #     HandlePosition.LEFT: "green",
+        #     HandlePosition.RIGHT: "cyan",
+        #     HandlePosition.BOTTOM_LEFT: "yellow",
+        #     HandlePosition.BOTTOM: "orange",
+        #     HandlePosition.BOTTOM_RIGHT: "pink",
+        # }
+        # color_name = debug_colors.get(self.position, "gray")
+        # self.setStyleSheet(f"background-color: {color_name};")
+        # self.setStyleSheet("background-color: red;") # Force all to red for this test - REMOVED FOR INVISIBILITY
+        
+        # self.setAutoFillBackground(True) # Not needed when using stylesheet for background
+        # self.setPalette(palette) # Palette method removed
+        
+        # Ensure a minimum visible size for debugging, even if thickness is small
+        # self.setMinimumSize(max(1, self.thickness), max(1, self.thickness)) # Not strictly needed if invisible
+
+        self.is_dragging = False
+        self.drag_start_pos = None
+        self.parent_window_start_geometry = None
+
+        self.update_geometry() # Call after setting palette, ensure it has a size before show
+        # print(f"[DEBUG EdgeHandle Init] Pos: {self.position}, Initial Geometry: {self.geometry()}")
+
+    def update_geometry(self):
+        parent_rect = self.parent_window.rect()
+        x, y, w, h = 0, 0, 0, 0
+        th = self.thickness # Alias for thickness
+
+        if self.position == HandlePosition.TOP_LEFT:
+            x, y, w, h = 0, 0, th, th
+        elif self.position == HandlePosition.TOP:
+            # Starts after top-left corner, ends before top-right corner
+            x, y, w, h = th, 0, parent_rect.width() - (2 * th), th
+        elif self.position == HandlePosition.TOP_RIGHT:
+            x, y, w, h = parent_rect.width() - th, 0, th, th
+        elif self.position == HandlePosition.LEFT:
+            # Starts after top-left corner, ends before bottom-left corner
+            x, y, w, h = 0, th, th, parent_rect.height() - (2 * th)
+        elif self.position == HandlePosition.RIGHT:
+            # Starts after top-right corner, ends before bottom-right corner
+            x, y, w, h = parent_rect.width() - th, th, th, parent_rect.height() - (2 * th)
+        elif self.position == HandlePosition.BOTTOM_LEFT:
+            x, y, w, h = 0, parent_rect.height() - th, th, th
+        elif self.position == HandlePosition.BOTTOM:
+            # Starts after bottom-left corner, ends before bottom-right corner
+            x, y, w, h = th, parent_rect.height() - th, parent_rect.width() - (2 * th), th
+        elif self.position == HandlePosition.BOTTOM_RIGHT:
+            x, y, w, h = parent_rect.width() - th, parent_rect.height() - th, th, th
+        
+        # Ensure width and height are not negative if window is too small
+        if w < 0: w = 0
+        if h < 0: h = 0
+
+        #print(f"[DEBUG update_geometry] Pos: {self.position}, Geom: x={x},y={y},w={w},h={h}, ParentRect: {parent_rect}") # DEBUG
+        self.setGeometry(x, y, w, h)
+        self.raise_() # Ensure it's on top
+
+    def enterEvent(self, event: QEvent):
+        cursor_shape = Qt.ArrowCursor
+        if self.position in [HandlePosition.TOP_LEFT, HandlePosition.BOTTOM_RIGHT]:
+            cursor_shape = Qt.SizeFDiagCursor
+        elif self.position in [HandlePosition.TOP_RIGHT, HandlePosition.BOTTOM_LEFT]:
+            cursor_shape = Qt.SizeBDiagCursor
+        elif self.position in [HandlePosition.TOP, HandlePosition.BOTTOM]:
+            cursor_shape = Qt.SizeVerCursor
+        elif self.position in [HandlePosition.LEFT, HandlePosition.RIGHT]:
+            cursor_shape = Qt.SizeHorCursor
+        
+        self.parent_window.setCursor(cursor_shape)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event: QEvent):
+        self.parent_window.setCursor(Qt.ArrowCursor)
+        super().leaveEvent(event)
+
+    # We will need mousePress, mouseMove, mouseRelease here later for actual resizing.
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.LeftButton and not self.parent_window.isMaximized():
+            self.is_dragging = True
+            self.drag_start_pos = event.globalPosition().toPoint()
+            self.parent_window_start_geometry = self.parent_window.geometry() # QRect
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if self.is_dragging and event.buttons() & Qt.LeftButton and self.parent_window_start_geometry:
+            current_global_pos = event.globalPosition().toPoint()
+            delta = current_global_pos - self.drag_start_pos
+
+            new_geometry = QRect(self.parent_window_start_geometry) # Make a copy
+
+            min_width = self.parent_window.minimumSizeHint().width()
+            min_height = self.parent_window.minimumSizeHint().height()
+            # Fallback if minimumSizeHint is not good (e.g. (0,0) or (-1,-1))
+            if min_width <=0: min_width = 100 
+            if min_height <=0: min_height = 100
+
+            # Adjust geometry based on handle position
+            if self.position == HandlePosition.LEFT:
+                new_width = self.parent_window_start_geometry.width() - delta.x()
+                if new_width >= min_width:
+                    new_geometry.setX(self.parent_window_start_geometry.x() + delta.x())
+                    new_geometry.setWidth(new_width)
+            elif self.position == HandlePosition.RIGHT:
+                new_geometry.setWidth(self.parent_window_start_geometry.width() + delta.x())
+            elif self.position == HandlePosition.TOP:
+                new_height = self.parent_window_start_geometry.height() - delta.y()
+                if new_height >= min_height:
+                    new_geometry.setY(self.parent_window_start_geometry.y() + delta.y())
+                    new_geometry.setHeight(new_height)
+            elif self.position == HandlePosition.BOTTOM:
+                new_geometry.setHeight(self.parent_window_start_geometry.height() + delta.y())
+            elif self.position == HandlePosition.TOP_LEFT:
+                new_width = self.parent_window_start_geometry.width() - delta.x()
+                new_height = self.parent_window_start_geometry.height() - delta.y()
+                if new_width >= min_width:
+                    new_geometry.setX(self.parent_window_start_geometry.x() + delta.x())
+                    new_geometry.setWidth(new_width)
+                if new_height >= min_height:
+                    new_geometry.setY(self.parent_window_start_geometry.y() + delta.y())
+                    new_geometry.setHeight(new_height)
+            elif self.position == HandlePosition.TOP_RIGHT:
+                new_height = self.parent_window_start_geometry.height() - delta.y()
+                new_geometry.setWidth(self.parent_window_start_geometry.width() + delta.x())
+                if new_height >= min_height:
+                    new_geometry.setY(self.parent_window_start_geometry.y() + delta.y())
+                    new_geometry.setHeight(new_height)
+            elif self.position == HandlePosition.BOTTOM_LEFT:
+                new_width = self.parent_window_start_geometry.width() - delta.x()
+                new_geometry.setHeight(self.parent_window_start_geometry.height() + delta.y())
+                if new_width >= min_width:
+                    new_geometry.setX(self.parent_window_start_geometry.x() + delta.x())
+                    new_geometry.setWidth(new_width)
+            elif self.position == HandlePosition.BOTTOM_RIGHT:
+                new_geometry.setWidth(self.parent_window_start_geometry.width() + delta.x())
+                new_geometry.setHeight(self.parent_window_start_geometry.height() + delta.y())
+
+            # Enforce minimum size on the final calculated geometry
+            if new_geometry.width() < min_width: new_geometry.setWidth(min_width)
+            if new_geometry.height() < min_height: new_geometry.setHeight(min_height)
+            
+            self.parent_window.setGeometry(new_geometry)
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.LeftButton and self.is_dragging:
+            self.is_dragging = False
+            self.drag_start_pos = None
+            self.parent_window_start_geometry = None
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
 @dataclass
 class WindowSettings:
     """Store window position, size and state."""
@@ -460,7 +642,8 @@ class ViewMeshApp(QMainWindow):
         self.config = config
         self.setObjectName("ViewMeshAppMainWindow") # Added for event filter logging
         self.was_maximized_before_fullscreen = False # Initialize flag
-        
+        self.resize_handle_thickness = 5 # Configurable thickness for resize handles
+
         # Flags and positions for context menu initiated move
         self.is_context_menu_moving = False
         self.context_menu_drag_start_position = None
@@ -491,12 +674,13 @@ class ViewMeshApp(QMainWindow):
         
         # Apply initial font size adjustment if any (AFTER UI is set up and state restored)
         if self.global_font_size_adjust != 0:
-            # print(f"[DEBUG __init__] Applying initial font adjustment: {self.global_font_size_adjust}")
             self._apply_global_font_change()
         
-        # Set resize cursor for window edges
-        self.setMouseTracking(True)
-        self.resize_padding = 5
+        self._create_resize_handles()
+
+        # Set resize cursor for window edges (now handled by EdgeResizeHandle)
+        # self.setMouseTracking(True)
+        # self.resize_padding = 5 # replaced by resize_handle_thickness
         
         self.dragging = False
         self.drag_start_position = None
@@ -836,6 +1020,30 @@ class ViewMeshApp(QMainWindow):
                 background-color: #1e1e1e;
             }
         """)
+    
+    def _create_resize_handles(self):
+        self.edge_handles = []
+        positions = [
+            HandlePosition.TOP_LEFT, HandlePosition.TOP, HandlePosition.TOP_RIGHT,
+            HandlePosition.LEFT, HandlePosition.RIGHT,
+            HandlePosition.BOTTOM_LEFT, HandlePosition.BOTTOM, HandlePosition.BOTTOM_RIGHT
+        ]
+        for pos in positions:
+            handle = EdgeResizeHandle(self, pos, self.resize_handle_thickness)
+            self.edge_handles.append(handle)
+            handle.show() # Ensure they are visible
+            handle.raise_() # Explicitly raise it after showing
+            # print(f"[DEBUG _create_resize_handles] Created handle: {pos}, Visible: {handle.isVisible()}, Geom: {handle.geometry()}")
+
+    def resizeEvent(self, event: QResizeEvent):
+        """Handle window resize event to update handle geometries."""
+        super().resizeEvent(event)
+        if hasattr(self, 'edge_handles'): # Ensure handles are created
+            for handle in self.edge_handles:
+                handle.update_geometry()
+        
+        # Update title bar height as well, as font changes can affect it via resize
+        self._update_title_bar_height()
     
     def _update_title_bar_height(self):
         """Calculates and sets the title bar height based on current menu bar font and content."""
@@ -1509,13 +1717,24 @@ class ViewMeshApp(QMainWindow):
     def get_resize_direction(self, pos: QPoint) -> str:
         """Get the resize direction based on mouse position."""
         if self.isMaximized(): return '' # No resize if maximized
-        rect = self.rect()
-        padding = self.resize_padding
+        rect = self.rect() # Client rectangle
+        padding = self.resize_handle_thickness
         
-        on_left = pos.x() >= 0 and pos.x() <= padding
-        on_right = pos.x() >= rect.width() - padding and pos.x() <= rect.width()
-        on_top = pos.y() >=0 and pos.y() <= padding
-        on_bottom = pos.y() >= rect.height() - padding and pos.y() <= rect.height()
+        # Corrected conditions for 0-indexed client area coordinates
+        # Max valid x is rect.width() - 1, max valid y is rect.height() - 1
+        on_left = pos.x() < padding # For x in [0, padding-1]
+        on_right = pos.x() >= rect.width() - padding # For x in [width-padding, width-1]
+        on_top = pos.y() < padding # For y in [0, padding-1]
+        on_bottom = pos.y() >= rect.height() - padding # For y in [height-padding, height-1]
+
+        # Ensure position is within the window bounds for edge detection to be valid
+        # Although mapFromGlobal in nativeEvent handles this, good for general purpose fn
+        if not rect.contains(pos):
+             # If outside the main client rect, but could be on a thicker conceptual border,
+             # the simple padding checks might still be relevant if padding is interpreted broadly.
+             # However, for strict client area padding, this check is useful.
+             # For now, let the simple boundary checks decide, as WM_NCHITTEST operates on window coords.
+             pass 
 
         if on_top and on_left: return 'top-left'
         if on_bottom and on_left: return 'bottom-left'
@@ -1556,58 +1775,9 @@ class ViewMeshApp(QMainWindow):
         super().mouseDoubleClickEvent(event)
 
     def nativeEvent(self, eventType, message):
-        """Handle native window events for window resizing (Windows)."""
-        if sys.platform == "win32" and not self.isMaximized():
-            try:
-                msg_ptr = int(message)
-            except (TypeError, ValueError):
-                return super().nativeEvent(eventType, message)
-
-            msg = ctypes.c_uint.from_address(msg_ptr).value
-            
-            if msg == 0x0084:  # WM_NCHITTEST
-                cursor_pos = QCursor.pos()
-                local_pos = self.mapFromGlobal(cursor_pos)
-                
-                x = local_pos.x()
-                y = local_pos.y()
-                w = self.width()
-                h = self.height()
-                # Determine title bar rect in local QMainWindow coordinates
-                # title_bar_local_y_end = self.title_bar.mapTo(self, self.title_bar.rect().bottomRight()).y()
-                # A simpler way: title_bar height is fixed
-                title_bar_height = self.title_bar.height() 
-
-                p = self.resize_padding # For resize borders
-                ht_result = 0
-
-                # Check resize borders first
-                if x >= 0 and x < p and y >= 0 and y < p: ht_result = 13 # HTTOPLEFT
-                elif x > w - p and x <= w and y >= 0 and y < p: ht_result = 14 # HTTOPRIGHT
-                elif x >= 0 and x < p and y > h - p and y <= h: ht_result = 16 # HTBOTTOMLEFT
-                elif x > w - p and x <= w and y > h - p and y <= h: ht_result = 17 # HTBOTTOMRIGHT
-                elif x >= 0 and x < p: ht_result = 10 # HTLEFT
-                elif x > w - p and x <= w: ht_result = 11 # HTRIGHT
-                elif y >= 0 and y < p: ht_result = 12 # HTTOP
-                elif y > h - p and y <= h: ht_result = 15 # HTBOTTOM
-                # Now check for title bar (caption) area if not a resize border
-                # Ensure this check doesn't overlap with controls on the title bar; 
-                # that distinction should be made in mousePressEvent.
-                # nativeEvent is for telling Windows what *kind* of area the mouse is over.
-                elif y > p and y < title_bar_height: # Click is below top resize border and within title bar height
-                    ht_result = 2 # HTCAPTION
-                
-                if ht_result != 0:
-                    # print(f"nativeEvent (WM_NCHITTEST) at local_pos ({x},{y}): Returning ht_result: {ht_result}")
-                    return True, ht_result
-                else:
-                    # If not on border or our defined title bar area for HTCAPTION, let it be HTCLIENT or default
-                    # print(f"nativeEvent (WM_NCHITTEST) at local_pos ({x},{y}): No specific ht_result, passing to super.")
-                    pass # Fall through to super
-
-        result = super().nativeEvent(eventType, message)
-        # print(f"nativeEvent: type={eventType}, super_handled={result[0] if isinstance(result, tuple) else result}, super_result={result[1] if isinstance(result, tuple) and len(result) > 1 else None}")
-        return result
+        """Handle native window events (simplified)."""
+        # Reverted to simple pass-through. Resize and custom cursor logic via native events is removed.
+        return super().nativeEvent(eventType, message)
 
     def toggle_maximize(self):
         """Toggle maximize/restore window state."""
