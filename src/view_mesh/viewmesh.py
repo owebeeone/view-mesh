@@ -7,7 +7,7 @@ import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import ClassVar, Dict, List, Optional, Tuple, Any
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QDockWidget, QFileSystemModel, 
@@ -37,6 +37,38 @@ class WindowSettings:
     screen_geometry: Tuple[int, int, int, int] = (0, 0, 0, 0)  # x, y, width, height of screen
     global_font_size_adjust: int = 0 # New field
     
+    @staticmethod
+    def _parse_tuple_setting(
+        settings: QSettings, 
+        key: str, 
+        element_type: type, 
+        num_elements: int,
+        default_tuple_value: Tuple 
+    ) -> Tuple:
+        raw_value = settings.value(key) # QSettings.value() returns None if key not found
+
+        if raw_value is None: # Key not found
+            # Optional: print(f"Setting '{key}' not found. Using default {default_tuple_value}.")
+            return default_tuple_value
+
+        try:
+            # Ensure the value is treated as a string for parsing
+            value_str = str(raw_value)
+            if not isinstance(raw_value, str):
+                # Log a warning if the original type wasn't a string, as it's unexpected for this parsing logic.
+                print(f"Warning: Setting '{key}' (original value: '{raw_value}') had type {type(raw_value)}, parsed as string '{value_str}'.")
+
+            parts = value_str.strip("()").split(",")
+            if len(parts) != num_elements:
+                raise ValueError(f"String '{value_str}' derived from setting '{key}' does not have {num_elements} parts after splitting")
+            
+            # Construct the tuple with the specified element type, stripping whitespace from each part
+            parsed_elements = tuple(element_type(p.strip()) for p in parts)
+            return parsed_elements
+        except Exception as e:
+            print(f"Error parsing setting '{key}' (raw value: '{raw_value}'): {e}. Using default {default_tuple_value}.")
+            return default_tuple_value
+
     @classmethod
     def from_settings(cls, settings: QSettings) -> 'WindowSettings':
         """Load window settings from QSettings."""
@@ -61,15 +93,16 @@ class WindowSettings:
                 if len(parts) == 2:
                     result.position = (int(parts[0]), int(parts[1]))
         
-        if settings.contains("window/relative_position"):
-            rel_pos = settings.value("window/relative_position")
-            if isinstance(rel_pos, str):
-                try:
-                    parts = rel_pos.strip("()").split(",")
-                    if len(parts) == 2:
-                        result.relative_position = (float(parts[0]), float(parts[1]))
-                except:
-                    pass
+        # Replace the previous block for relative_position with a call to the helper
+        # result.relative_position already holds the dataclass default (e.g., (0.1, 0.1))
+        # This default is passed to the helper to be returned if key is missing or parsing fails.
+        result.relative_position = cls._parse_tuple_setting(
+            settings,
+            "window/relative_position",
+            element_type=float,
+            num_elements=2,
+            default_tuple_value=result.relative_position # Pass current default as the fallback
+        )
         
         if settings.contains("window/is_maximized"):
             result.is_maximized = settings.value("window/is_maximized", False, type=bool)
@@ -83,16 +116,15 @@ class WindowSettings:
         if settings.contains("window/screen_name"):
             result.screen_name = settings.value("window/screen_name", "")
         
-        if settings.contains("window/screen_geometry"):
-            geo = settings.value("window/screen_geometry")
-            if isinstance(geo, str):
-                # Parse string geometry 
-                try:
-                    parts = geo.strip("()").split(",")
-                    if len(parts) == 4:
-                        result.screen_geometry = tuple(int(p) for p in parts)
-                except:
-                    pass
+        # Replace the previous block for screen_geometry with a call to the helper
+        # result.screen_geometry already holds the dataclass default (e.g., (0,0,0,0))
+        result.screen_geometry = cls._parse_tuple_setting(
+            settings,
+            "window/screen_geometry",
+            element_type=int,
+            num_elements=4,
+            default_tuple_value=result.screen_geometry # Pass current default as fallback
+        )
         
         if settings.contains("window/global_font_size_adjust"):
             result.global_font_size_adjust = settings.value("window/global_font_size_adjust", 0, type=int)
@@ -142,7 +174,7 @@ class FileExplorerWidget(QWidget):
     """File explorer widget similar to VSCode."""
     parent: Optional[QWidget] = None
     initial_dir: str = field(default_factory=lambda: str(Path.home()))
-    file_selected: Signal = field(default_factory=lambda: Signal(str))
+    file_selected: ClassVar[Signal] = Signal(str)
 
     def __post_init__(self):
         super().__init__(self.parent)
@@ -508,6 +540,7 @@ class ViewMeshApp(QMainWindow):
         # print(f"Event filter installed on {self.title_bar.objectName()} in setup_ui")
         # self.title_bar.setFixedHeight(24) # Allow dynamic height based on content
         self.title_bar.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.title_bar.customContextMenuRequested.connect(self.show_title_bar_context_menu) # Added this line back
         self.title_bar_layout = QHBoxLayout(self.title_bar)
         self.title_bar_layout.setContentsMargins(0, 0, 0, 0)
         self.title_bar_layout.setSpacing(0)
@@ -736,6 +769,19 @@ class ViewMeshApp(QMainWindow):
         placeholder_layout.addStretch(1)
         self.tab_widget.addTab(placeholder, "Welcome")
         
+        # Add a placeholder tab for now - styled like VS Code welcome page
+        placeholder1 = QWidget()
+        placeholder1.setStyleSheet("background-color: #1e1e1e;")
+        pl_layout1 = QVBoxLayout(placeholder1)
+        pl_layout1.addWidget(QLabel("Editor Tab 1 Content"))
+        self.tab_widget.addTab(placeholder1, "Editor 1")
+
+        placeholder2 = QWidget()
+        placeholder2.setStyleSheet("background-color: #1e1e1e;")
+        pl_layout2 = QVBoxLayout(placeholder2)
+        pl_layout2.addWidget(QLabel("Editor Tab 2 Content"))
+        self.tab_widget.addTab(placeholder2, "Editor 2")
+
         # Ensure tab widget has proper styling
         self.tab_widget.setStyleSheet("""
             QTabWidget::pane {
@@ -1138,6 +1184,10 @@ class ViewMeshApp(QMainWindow):
                     rel_y = max(0.0, min(1.0, rel_y))
                     
                     self.config.settings.relative_position = (rel_x, rel_y)
+                else:
+                    # If screen geometry is not valid, keep existing or default relative_position
+                    # This prevents overwriting a valid relative_position with bad data if screen info is weird
+                    pass # self.config.settings.relative_position remains as loaded/default
                 
                 # print(f"Window position: {abs_x},{abs_y}")
                 # print(f"Window relative position: {self.config.settings.relative_position[0]:.2f},{self.config.settings.relative_position[1]:.2f}")
@@ -1647,6 +1697,14 @@ class ViewMeshApp(QMainWindow):
         # Keep action state in sync if explorer is closed by other means (e.g., context menu, 'x' button on dock)
         self.explorer_dock.visibilityChanged.connect(self.toggle_explorer_action.setChecked)
 
+        self.toggle_welcome_action = QAction("Show &Welcome", self)
+        self.toggle_welcome_action.setCheckable(True)
+        # self.toggle_welcome_action.setChecked(self.welcome_dock.isVisible()) # Set initial state
+        self.toggle_welcome_action.triggered.connect(self.toggle_welcome_panel)
+        view_menu.addAction(self.toggle_welcome_action)
+        # if hasattr(self, 'welcome_dock'): # Ensure welcome_dock exists before connecting
+            # self.welcome_dock.visibilityChanged.connect(self.toggle_welcome_action.setChecked)
+
         toggle_fullscreen_action = QAction("Toggle &Fullscreen", self)
         toggle_fullscreen_action.setShortcut(QKeySequence.FullScreen)
         toggle_fullscreen_action.triggered.connect(self.toggle_fullscreen)
@@ -1690,6 +1748,10 @@ class ViewMeshApp(QMainWindow):
             self._apply_global_font_change()
         else:
             print("decrease_font_size: Font size too small to decrease further.") # Debug
+
+    def toggle_welcome_panel(self, checked: bool):
+        if hasattr(self, 'welcome_dock'):
+            self.welcome_dock.setVisible(checked)
 
     def _perform_context_menu_move(self):
         if not self.is_context_menu_moving:
