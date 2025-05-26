@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QDockWidget, QFileSystemModel, 
     QTreeView, QVBoxLayout, QWidget, QMenuBar, QMenu, QStatusBar,
     QSplitter, QTabWidget, QToolBar, QMessageBox, QLabel,
-    QHBoxLayout, QPushButton, QFrame
+    QHBoxLayout, QPushButton, QFrame, QTextEdit # Added QTextEdit
 )
 from PySide6.QtCore import (
     Qt, QDir, QModelIndex, QSize, QPoint, QSettings, 
@@ -26,6 +26,130 @@ from PySide6.QtGui import (
 
 # Define an Enum for handle positions
 import enum
+
+class WindowGeometryManager:
+    """Manages saving and restoring window geometry, handling multi-screen setups."""
+    def __init__(self, window: QMainWindow, settings_object: Any, main_app_window_ref: Optional[QMainWindow] = None):
+        self.window = window
+        self.settings = settings_object # This will be an instance of WindowSettings or InspectorWindowSettings
+        self.main_app_window_ref = main_app_window_ref if main_app_window_ref else window # For inspector, main_app_window is different
+
+    def restore_geometry(self):
+        """Restores the window's size and position based on stored settings."""
+        self.window.resize(QSize(*self.settings.size))
+
+        screens = QApplication.screens()
+        target_screen = None
+
+        # 1. Try to find the saved screen by name
+        if self.settings.screen_name:
+            for screen in screens:
+                if screen.name() == self.settings.screen_name:
+                    target_screen = screen
+                    break
+        
+        # 2. If not found, try to find a screen that contains the saved absolute position
+        if not target_screen and self.settings.position != (0,0): # (0,0) can be an uninitialized default
+            # Create a QRect of minimal size at the saved position to check containment
+            saved_point_rect = QRect(self.settings.position[0], self.settings.position[1], 1, 1)
+            for screen in screens:
+                if screen.geometry().intersects(saved_point_rect): # Check if point is within screen
+                    target_screen = screen
+                    break
+        
+        # 3. Fallback: use the main application window's screen (if this isn't the main app window itself)
+        #    or the primary screen.
+        if not target_screen:
+            if self.main_app_window_ref is not self.window and self.main_app_window_ref and self.main_app_window_ref.isVisible():
+                 target_screen = self.main_app_window_ref.screen()
+            else: # For main window itself or if main_app_window_ref is not useful
+                target_screen = QApplication.primaryScreen()
+
+        if not target_screen: # Should be extremely rare
+            print(f"WindowGeometryManager ({self.window.windowTitle()}): Critical - No target screen found. Using primary screen.")
+            target_screen = QApplication.primaryScreen()
+            if not target_screen: # Even rarer, e.g. no screens connected
+                 print(f"WindowGeometryManager ({self.window.windowTitle()}): Critical - No primary screen available.")
+                 self.window.move(self.settings.position[0], self.settings.position[1]) # Basic move
+                 return
+
+
+        screen_geo = target_screen.geometry()
+        avail_geo = target_screen.availableGeometry()
+
+        pos_x, pos_y = 0, 0
+        
+        # Prioritize relative positioning if screen context was meaningfully saved
+        use_relative = bool(self.settings.screen_name and self.settings.screen_geometry != (0,0,0,0) and hasattr(self.settings, 'relative_position'))
+
+        if use_relative:
+            rel_x, rel_y = self.settings.relative_position
+            pos_x = avail_geo.x() + int(rel_x * avail_geo.width())
+            pos_y = avail_geo.y() + int(rel_y * avail_geo.height())
+        else:
+            pos_x, pos_y = self.settings.position
+
+        # Boundary checks: Ensure the window is placed visibly on the target screen
+        # Adjust so at least a small part of the window is visible if it's off-screen.
+        # A common strategy is to ensure its top-left is within screen bounds,
+        # and then adjust if bottom-right goes out.
+
+        # Ensure top-left is not way off screen
+        pos_x = max(avail_geo.x() - self.window.width() + 20, min(pos_x, avail_geo.x() + avail_geo.width() - 20))
+        pos_y = max(avail_geo.y() - self.window.height() + 20, min(pos_y, avail_geo.y() + avail_geo.height() - 20))
+
+        # Ensure it's not completely outside the available geometry
+        pos_x = max(avail_geo.x(), min(pos_x, avail_geo.x() + avail_geo.width() - self.window.width()))
+        pos_y = max(avail_geo.y(), min(pos_y, avail_geo.y() + avail_geo.height() - self.window.height()))
+        
+        self.window.move(pos_x, pos_y)
+
+    def save_geometry(self):
+        """Saves the window's current size, position, and screen information to settings."""
+        if not self.window.isVisible() and not self.window.isMinimized(): # Don't save if hidden unless minimized
+            # If minimized, geometry is still valid, but if just hidden, it might be (0,0) or irrelevant
+            if not self.window.isMinimized():
+                 # print(f"WindowGeometryManager ({self.window.windowTitle()}): Window not visible or minimized, not saving geometry.")
+                return
+
+        # For minimized windows, self.pos() and self.size() might return unhelpful values
+        # QWidget.normalGeometry() gives the geometry it would have if shown normally.
+        current_geometry = self.window.normalGeometry() if self.window.isMinimized() else self.window.geometry()
+
+        self.settings.size = (current_geometry.width(), current_geometry.height())
+        self.settings.position = (current_geometry.x(), current_geometry.y())
+
+        current_screen = QApplication.screenAt(current_geometry.center()) # More robust way to get screen for a geometry
+        if not current_screen: # Fallback if center is somehow off-screen
+            current_screen = self.window.screen()
+
+
+        if current_screen:
+            self.settings.screen_name = current_screen.name()
+            screen_geo_actual = current_screen.geometry()
+            avail_geo = current_screen.availableGeometry()
+            
+            self.settings.screen_geometry = (
+                screen_geo_actual.x(), screen_geo_actual.y(), 
+                screen_geo_actual.width(), screen_geo_actual.height()
+            )
+
+            if hasattr(self.settings, 'relative_position'):
+                if avail_geo.width() > 0 and avail_geo.height() > 0:
+                    # Calculate relative to the *actual position* which might be from normalGeometry()
+                    rel_x = float(current_geometry.x() - avail_geo.x()) / float(avail_geo.width())
+                    rel_y = float(current_geometry.y() - avail_geo.y()) / float(avail_geo.height())
+                    self.settings.relative_position = (max(0.0, min(1.0, rel_x)), max(0.0, min(1.0, rel_y)))
+                else: # Should not happen with a valid screen
+                    self.settings.relative_position = (0.1, 0.1) # Fallback
+        else:
+            # Clear screen-specifics if no screen found (highly unlikely for a visible/minimized window)
+            self.settings.screen_name = ""
+            self.settings.screen_geometry = (0,0,0,0)
+            if hasattr(self.settings, 'relative_position'):
+                self.settings.relative_position = (0.1, 0.1) # Fallback
+
+
 class HandlePosition(enum.Enum):
     TOP_LEFT = 0
     TOP = 1
@@ -206,6 +330,185 @@ class EdgeResizeHandle(QWidget):
         else:
             super().mouseReleaseEvent(event)
 
+class InspectorWindow(QMainWindow):
+    def __init__(self, main_app_window: QMainWindow, parent=None):
+        super().__init__(parent)
+        self.main_app_window = main_app_window
+        self.config = main_app_window.config
+        self.geometry_manager = WindowGeometryManager(self, self.config.inspector_settings, self.main_app_window)
+
+        self.setWindowTitle("ViewMesh Inspector")
+        
+        self.tab_widget = QTabWidget()
+        self.setCentralWidget(self.tab_widget)
+
+        # Hierarchy Tab - Updated
+        self.hierarchy_tab = QWidget()
+        self.hierarchy_layout = QVBoxLayout(self.hierarchy_tab)
+        
+        self.refresh_hierarchy_button = QPushButton("Refresh Hierarchy")
+        self.refresh_hierarchy_button.clicked.connect(self._refresh_hierarchy_view)
+        self.hierarchy_layout.addWidget(self.refresh_hierarchy_button)
+        
+        self.hierarchy_text_edit = QTextEdit()
+        self.hierarchy_text_edit.setReadOnly(True)
+        self.hierarchy_text_edit.setFontFamily("monospace") # Good for XML-like text
+        self.hierarchy_layout.addWidget(self.hierarchy_text_edit)
+        
+        self.tab_widget.addTab(self.hierarchy_tab, "Hierarchy")
+
+        # Console Tab
+        self.console_tab = QWidget()
+        self.console_layout = QVBoxLayout(self.console_tab)
+        self.console_layout.addWidget(QLabel("Application Console Output (Placeholder)")) # Placeholder
+        self.tab_widget.addTab(self.console_tab, "Console")
+
+        # Apply the same dark theme as the main window if desired
+        if hasattr(self.main_app_window, 'apply_vs_code_dark_theme'):
+             # This is a bit of a hack to get the stylesheet.
+             # A better way would be to have a central style manager.
+            # temp_widget = QWidget() # Create a temporary widget # Not strictly needed if using app stylesheet
+            # self.main_app_window.apply_vs_code_dark_theme() # Ensure app stylesheet is current
+            # self.setStyleSheet(QApplication.instance().styleSheet()) # This can be too broad and cause issues
+            # For now, direct styling for key elements is safer for a secondary window.
+            self.setStyleSheet("""
+                QMainWindow { background-color: #1e1e1e; color: #cccccc; }
+                QTabWidget::pane { border: 1px solid #474747; background-color: #1e1e1e; }
+                QTabBar::tab { background-color: #2d2d2d; color: #cccccc; border: 1px solid #474747; padding: 6px 12px; margin-right: 1px; }
+                QTabBar::tab:selected { background-color: #1e1e1e; border-bottom-color: #1e1e1e; }
+                QLabel { background-color: transparent; color: #cccccc; }
+            """)
+
+    def _refresh_hierarchy_view(self):
+        xml_data = self._generate_widget_hierarchy_xml()
+        self.hierarchy_text_edit.setPlainText(xml_data)
+
+    def _generate_widget_hierarchy_xml(self) -> str:
+        if not self.main_app_window:
+            return "<error>Main application window not available.</error>"
+        
+        # Start recursion from the main_app_window itself
+        return self._build_widget_xml_string(self.main_app_window, 0)
+
+    def _build_widget_xml_string(self, widget: QWidget, indent_level: int) -> str:
+        indent = "  " * indent_level
+        class_name = widget.metaObject().className()
+        object_name = widget.objectName()
+        geometry = widget.geometry()
+
+        # DEBUG: Print current widget being processed (ACTIVE BY DEFAULT)
+        print(f"{indent}Processing: {class_name} name='{object_name or ''}' geom={geometry}")
+
+        xml_string = f'''{indent}<{class_name} '''
+        if object_name:
+            safe_object_name = object_name.replace('"', '&quot;') 
+            xml_string += f'name="{safe_object_name}" '
+        
+        has_internal_content = False
+
+        if hasattr(widget, 'text') and callable(widget.text):
+            # print(f"{indent}  Checking text for {class_name} ('{object_name}'). Has text attr: True")
+            try:
+                widget_text = widget.text()
+                if widget_text and isinstance(widget_text, str):
+                    # print(f"{indent}    Found text: '{widget_text[:50]}'")
+                    safe_widget_text = widget_text.replace('"', '&quot;').replace('\n', ' ')
+                    xml_string += f'text="{safe_widget_text}" '
+            except Exception as e:
+                # print(f"{indent}    Error getting text: {e}")
+                pass
+        # else:
+            # print(f"{indent}  No callable 'text' attribute for {class_name} ('{object_name}')")
+
+        if hasattr(widget, 'windowTitle') and callable(widget.windowTitle):
+            try:
+                title = widget.windowTitle()
+                if title and isinstance(title, str):
+                    safe_title = title.replace('"', '&quot;')
+                    xml_string += f'windowTitle="{safe_title}" '
+            except Exception:
+                pass
+
+        xml_string += f'geometry="({geometry.x()},{geometry.y()},{geometry.width()},{geometry.height()})">' 
+        xml_string += '\n'
+        
+        if isinstance(widget, QTabWidget):
+            if widget.count() > 0:
+                has_internal_content = True
+            for i in range(widget.count()):
+                tab_text = widget.tabText(i).replace('"', '&quot;')
+                tab_tooltip = widget.tabToolTip(i).replace('"', '&quot;')
+                tab_info_str = f'{indent}  <Tab index="{i}" title="{tab_text}"'
+                if tab_tooltip:
+                    tab_info_str += f' tooltip="{tab_tooltip}"'
+                tab_info_str += ' />\n'
+                xml_string += tab_info_str
+
+        # Use widget.children() and filter for QWidget, then check if they are direct children.
+        # This is a more robust way to find all QWidget children.
+        potential_children = widget.children()
+        actual_qwidget_children = []
+        if potential_children:
+            for child_obj in potential_children:
+                if isinstance(child_obj, QWidget):
+                    # Crucially, ensure it's a direct child for a clean hierarchy display
+                    # If child_obj.parent() is not widget, it might be a grandchild through a non-QWidget parent, or complex parenting.
+                    # However, for typical UI structures, child_obj.parent() == widget is expected for direct children.
+                    # Let's assume for now that if it's in .children() and is a QWidget, it's relevant for inspection.
+                    # Qt.FindDirectChildrenOnly with findChildren is usually better for strict direct children.
+                    # If this still doesn't work, the issue might be deeper in widget parenting.
+                    actual_qwidget_children.append(child_obj)
+        
+        # DEBUG: Print found children (ACTIVE BY DEFAULT)
+        if actual_qwidget_children:
+            print(f"{indent}  Children of {class_name} ('{object_name or ''}'): {[c.metaObject().className() + (' ('+c.objectName()+')' if c.objectName() else '') for c in actual_qwidget_children]}")
+        else:
+            print(f"{indent}  No QWidget children for {class_name} ('{object_name or ''}') found via .children() filtering")
+
+
+        if actual_qwidget_children:
+            has_internal_content = True
+            for child_widget in actual_qwidget_children:
+                # print(f"{indent}    Looping to child: {child_widget.metaObject().className()} name='{child_widget.objectName() or ''}'")
+                if child_widget == self or (hasattr(child_widget, 'parent_window') and child_widget.parent_window == self):
+                    continue
+                if isinstance(child_widget, EdgeResizeHandle):
+                    child_obj_name = child_widget.objectName() if child_widget.objectName() else ''
+                    safe_child_obj_name = child_obj_name.replace('"', '&quot;')
+                    pos_name = child_widget.position.name if hasattr(child_widget, 'position') and child_widget.position else 'N/A'
+                    child_geom = child_widget.geometry()
+                    geom_str = f"({child_geom.x()},{child_geom.y()},{child_geom.width()},{child_geom.height()})"
+                    xml_string += f'''{indent}  <{child_widget.metaObject().className()} name="{safe_child_obj_name}" geometry="{geom_str}" position="{pos_name}" />\n'''
+                    continue
+                xml_string += self._build_widget_xml_string(child_widget, indent_level + 1)
+        
+        if has_internal_content:
+            xml_string += f"{indent}</{class_name}>\n"
+        else:
+            xml_string = xml_string.rstrip('\n').rstrip('>') + ' />\n'
+            
+        return xml_string
+
+    def _restore_geometry_and_position(self):
+        # This method is now replaced by WindowGeometryManager
+        pass
+        
+    def _save_geometry_and_position(self):
+        # This method is now replaced by WindowGeometryManager
+        pass
+
+    def closeEvent(self, event: QCloseEvent):
+        # self._save_geometry_and_position() # Old method call
+        self.geometry_manager.save_geometry() # Use manager
+        self.config.save() # Still need to save the AppConfig which holds inspector_settings
+
+        # print("InspectorWindow closing")
+        # Nullify reference to avoid potential issues if main window closes first etc.
+        # Or manage this window's lifecycle from ViewMeshApp more carefully
+        if hasattr(self.main_app_window, 'inspector_window_instance'):
+            self.main_app_window.inspector_window_instance = None
+        super().closeEvent(event)
+
 @dataclass
 class WindowSettings:
     """Store window position, size and state."""
@@ -328,11 +631,88 @@ class WindowSettings:
             settings.setValue("window/state", self.state)
 
 @dataclass
+class InspectorWindowSettings:
+    """Store inspector window position and size."""
+    size: Tuple[int, int] = (800, 600)
+    position: Tuple[int, int] = (150, 150) # Absolute position, used as fallback or if screen info is lost
+    relative_position: Tuple[float, float] = (0.15, 0.15) # Relative to screen, similar to main window
+    screen_name: str = "" # Store screen identifier
+    screen_geometry: Tuple[int, int, int, int] = (0, 0, 0, 0)  # x, y, width, height of screen it was on
+
+    @classmethod
+    def from_settings(cls, settings: QSettings, prefix: str = "inspector_window/") -> 'InspectorWindowSettings':
+        """Load inspector window settings from QSettings."""
+        result = cls()
+        size_key = f"{prefix}size"
+        pos_key = f"{prefix}position"
+        rel_pos_key = f"{prefix}relative_position"
+        screen_name_key = f"{prefix}screen_name"
+        screen_geom_key = f"{prefix}screen_geometry"
+
+        if settings.contains(size_key):
+            size_val = settings.value(size_key)
+            if isinstance(size_val, QSize):
+                result.size = (size_val.width(), size_val.height())
+            elif isinstance(size_val, str):
+                try:
+                    parts = size_val.strip("()").split(",")
+                    if len(parts) == 2:
+                        result.size = (int(parts[0].strip()), int(parts[1].strip()))
+                except ValueError:
+                    print(f"Warning: Could not parse inspector size string: {size_val}")
+            elif isinstance(size_val, (list, tuple)) and len(size_val) == 2:
+                 result.size = (int(size_val[0]), int(size_val[1]))
+
+        if settings.contains(pos_key):
+            pos_val = settings.value(pos_key)
+            if isinstance(pos_val, QPoint):
+                result.position = (pos_val.x(), pos_val.y())
+            elif isinstance(pos_val, str):
+                try:
+                    parts = pos_val.strip("()").split(",")
+                    if len(parts) == 2:
+                        result.position = (int(parts[0].strip()), int(parts[1].strip()))
+                except ValueError:
+                    print(f"Warning: Could not parse inspector position string: {pos_val}")
+            elif isinstance(pos_val, (list, tuple)) and len(pos_val) == 2:
+                result.position = (int(pos_val[0]), int(pos_val[1]))
+
+        # Use the helper from WindowSettings for tuple parsing
+        result.relative_position = WindowSettings._parse_tuple_setting(
+            settings,
+            rel_pos_key,
+            element_type=float,
+            num_elements=2,
+            default_tuple_value=result.relative_position
+        )
+
+        if settings.contains(screen_name_key):
+            result.screen_name = settings.value(screen_name_key, "", type=str)
+
+        result.screen_geometry = WindowSettings._parse_tuple_setting(
+            settings,
+            screen_geom_key,
+            element_type=int,
+            num_elements=4,
+            default_tuple_value=result.screen_geometry
+        )
+        return result
+
+    def save_to_settings(self, settings: QSettings, prefix: str = "inspector_window/") -> None:
+        """Save inspector window settings to QSettings."""
+        settings.setValue(f"{prefix}size", QSize(*self.size))
+        settings.setValue(f"{prefix}position", QPoint(*self.position)) # Save absolute as well
+        settings.setValue(f"{prefix}relative_position", str(self.relative_position))
+        settings.setValue(f"{prefix}screen_name", self.screen_name)
+        settings.setValue(f"{prefix}screen_geometry", str(self.screen_geometry))
+
+@dataclass
 class AppConfig:
     """Application configuration."""
     app_name: str = "ViewMesh"
     org_name: str = "AnchorSCAD"
     settings: WindowSettings = field(default_factory=WindowSettings)
+    inspector_settings: InspectorWindowSettings = field(default_factory=InspectorWindowSettings) # Added
     initial_dir: str = field(default_factory=lambda: str(Path.home()))
     
     @classmethod
@@ -341,6 +721,7 @@ class AppConfig:
         config = cls()
         settings = QSettings(config.org_name, config.app_name)
         config.settings = WindowSettings.from_settings(settings)
+        config.inspector_settings = InspectorWindowSettings.from_settings(settings) # Added
         if settings.contains("app/initial_dir"):
             config.initial_dir = settings.value("app/initial_dir")
         return config
@@ -349,6 +730,7 @@ class AppConfig:
         """Save configuration to settings."""
         settings = QSettings(self.org_name, self.app_name)
         self.settings.save_to_settings(settings)
+        self.inspector_settings.save_to_settings(settings) # Added
         settings.setValue("app/initial_dir", self.initial_dir)
 
 @dataclass
@@ -640,9 +1022,11 @@ class ViewMeshApp(QMainWindow):
     def __init__(self, config: AppConfig):
         super().__init__(None, Qt.FramelessWindowHint)  # Make window frameless
         self.config = config
-        self.setObjectName("ViewMeshAppMainWindow") # Added for event filter logging
-        self.was_maximized_before_fullscreen = False # Initialize flag
-        self.resize_handle_thickness = 5 # Configurable thickness for resize handles
+        self.setObjectName("ViewMeshAppMainWindow") 
+        self.was_maximized_before_fullscreen = False 
+        self.resize_handle_thickness = 5 
+        self.inspector_window_instance = None 
+        self.geometry_manager = WindowGeometryManager(self, self.config.settings) # Initialize manager
 
         # Flags and positions for context menu initiated move
         self.is_context_menu_moving = False
@@ -669,8 +1053,29 @@ class ViewMeshApp(QMainWindow):
         # Set up UI (event filter for title_bar will be installed here)
         self.setup_ui()
         
-        # Restore window state
-        self.restore_window_state()
+        # Restore window state using the manager
+        # self.restore_window_state() # Old method call
+        self.setWindowOpacity(0.0) # Prevent flicker
+        self.show() # Show before moving to ensure Qt knows it exists
+        self.geometry_manager.restore_geometry()
+        QApplication.processEvents() # Allow Qt to process move/resize
+        self.setWindowOpacity(1.0)
+
+        # Restore maximized state (after geometry is set)
+        if self.config.settings.is_maximized:
+            self.showMaximized()
+        
+        # Restore dock widget sizes (specific to ViewMeshApp)
+        self.explorer_dock.setMinimumWidth(self.config.settings.explorer_width)
+        self.explorer_dock.setMaximumWidth(self.config.settings.explorer_width)
+        
+        # Restore complete window state if available (specific to ViewMeshApp)
+        if self.config.settings.state:
+            self.restoreState(self.config.settings.state)
+        
+        # Restore initial directory (specific to ViewMeshApp)
+        if hasattr(self.explorer, 'initial_dir'): # Check if explorer exists
+            self.explorer.initial_dir = self.config.initial_dir
         
         # Apply initial font size adjustment if any (AFTER UI is set up and state restored)
         if self.global_font_size_adjust != 0:
@@ -1282,132 +1687,26 @@ class ViewMeshApp(QMainWindow):
     
     def restore_window_state(self):
         """Restore the window state from the configuration."""
-        # Get available screens
-        screens = QApplication.screens()
-        target_screen = None
-        
-        # Try to find the saved screen by name
-        if self.config.settings.screen_name:
-            for screen in screens:
-                if screen.name() == self.config.settings.screen_name:
-                    target_screen = screen
-                    break
-        
-        # If the saved screen wasn't found, use the primary screen
-        if not target_screen:
-            target_screen = QApplication.primaryScreen()
-        
-        # Get screen geometries
-        screen_geo = target_screen.geometry()
-        avail_geo = target_screen.availableGeometry()
-        
-        # Restore window size 
-        self.resize(QSize(*self.config.settings.size))
-        
-        # Make the window invisible before showing it to prevent flashing
-        self.setWindowOpacity(0.0)
-        
-        # Show the window before moving to ensure Qt knows it exists
-        self.show()
-        
-        # Position window at the center of the target screen first
-        screen_center = screen_geo.center()
-        self.move(screen_center.x() - self.width() // 2, screen_center.y() - self.height() // 2)
-        
-        # Allow Qt events to process
-        QApplication.processEvents()
-        
-        # Now position the window at its saved location
-        if self.config.settings.screen_name:
-            # Get saved position with boundary checks
-            saved_x, saved_y = self.config.settings.position
-            
-            # Safety check to ensure window is within screen
-            if saved_x < screen_geo.left():
-                saved_x = screen_geo.left() + 10
-            elif saved_x + self.width() > screen_geo.right():
-                saved_x = screen_geo.right() - self.width() - 10
-            
-            if saved_y < screen_geo.top():
-                saved_y = screen_geo.top() + 10
-            elif saved_y + self.height() > screen_geo.bottom():
-                saved_y = screen_geo.bottom() - self.height() - 10
-            
-            self.move(saved_x, saved_y)
-            
-            # Process events again to ensure the window manager acknowledges this movement
-            QApplication.processEvents()
-        
-        # Now make the window visible in its final position
-        self.setWindowOpacity(1.0)
-        
-        # Restore maximized state
-        if self.config.settings.is_maximized:
-            self.showMaximized()
-        
-        # Restore dock widget sizes
-        self.explorer_dock.setMinimumWidth(self.config.settings.explorer_width)
-        self.explorer_dock.setMaximumWidth(self.config.settings.explorer_width)
-        
-        # Restore complete window state if available
-        if self.config.settings.state:
-            self.restoreState(self.config.settings.state)
-        
-        # Restore initial directory
-        self.explorer.initial_dir = self.config.initial_dir
-        
-        # Save configuration
-        self.config.save()
+        # This method is now largely replaced by WindowGeometryManager
+        # but parts related to maximized state, dockwidgets, and QMainWindow.restoreState
+        # will be called directly after the geometry_manager.restore_geometry()
+        pass # Keep the method for now, but its core is moved
     
     def save_window_state(self):
         """Save the current window state to the configuration."""
-        # Get current screen
-        current_screen = self.screen()
-        if current_screen:
-            # Save screen information
-            self.config.settings.screen_name = current_screen.name()
-            screen_geo = current_screen.geometry()
-            avail_geo = current_screen.availableGeometry()
-            self.config.settings.screen_geometry = (
-                screen_geo.x(), screen_geo.y(), 
-                screen_geo.width(), screen_geo.height()
-            )
-            
-            # Save window position and size
-            if not self.isMaximized():
-                self.config.settings.size = (self.width(), self.height())
-                
-                # Save absolute position
-                abs_x, abs_y = self.x(), self.y()
-                self.config.settings.position = (abs_x, abs_y)
-                
-                # Calculate and save position relative to available screen area
-                # This is more reliable for multi-monitor setups with different resolutions
-                if avail_geo.width() > 0 and avail_geo.height() > 0:
-                    rel_x = float(abs_x - avail_geo.x()) / float(avail_geo.width())
-                    rel_y = float(abs_y - avail_geo.y()) / float(avail_geo.height())
-                    
-                    # Constrain to valid range [0.0, 1.0]
-                    rel_x = max(0.0, min(1.0, rel_x))
-                    rel_y = max(0.0, min(1.0, rel_y))
-                    
-                    self.config.settings.relative_position = (rel_x, rel_y)
-                else:
-                    # If screen geometry is not valid, keep existing or default relative_position
-                    # This prevents overwriting a valid relative_position with bad data if screen info is weird
-                    pass # self.config.settings.relative_position remains as loaded/default
-                
-                # print(f"Window position: {abs_x},{abs_y}")
-                # print(f"Window relative position: {self.config.settings.relative_position[0]:.2f},{self.config.settings.relative_position[1]:.2f}")
-                # print(f"Window size: {self.width()},{self.height()}")
-        
+        # Use the geometry manager
+        self.geometry_manager.save_geometry()
+
+        # Save other ViewMeshApp-specific states
         self.config.settings.is_maximized = self.isMaximized()
-        self.config.settings.explorer_width = self.explorer_dock.width()
+        if hasattr(self.explorer_dock, 'width'): # Check if dock exists
+            self.config.settings.explorer_width = self.explorer_dock.width()
         self.config.settings.state = self.saveState()
-        self.config.initial_dir = self.explorer.initial_dir
-        self.config.settings.global_font_size_adjust = self.global_font_size_adjust # Save current adjustment
+        if hasattr(self.explorer, 'initial_dir'): # Check if explorer exists
+            self.config.initial_dir = self.explorer.initial_dir
+        self.config.settings.global_font_size_adjust = self.global_font_size_adjust
         
-        # Save configuration
+        # Save configuration (the manager doesn't call config.save() itself)
         self.config.save()
     
     def closeEvent(self, event: QCloseEvent):
@@ -1476,6 +1775,7 @@ class ViewMeshApp(QMainWindow):
         """Set up a status bar similar to VS Code."""
         self.status_bar = QStatusBar()
         self.status_bar.setObjectName("status_bar")
+        self.status_bar.setSizeGripEnabled(False)
         self.setStatusBar(self.status_bar)
         
         # Style the status bar
@@ -1509,7 +1809,8 @@ class ViewMeshApp(QMainWindow):
         # Indent size indicator
         self.indent_label = QLabel("Spaces: 4")
         self.indent_label.setObjectName("indent_label")
-        self.indent_label.setStyleSheet("padding: 3px 8px; border-left: 1px solid rgba(255, 255, 255, 0.3);")
+        # Padding: 3px top/bottom, 8px left (for border alignment). Margin: 5px right for blue space.
+        self.indent_label.setStyleSheet("padding: 3px 8px 3px 8px; margin-right: 3px; border-left: 1px solid rgba(255, 255, 255, 0.3);")
         self.status_bar.addPermanentWidget(self.indent_label)
         
         # Main status message (left-aligned)
@@ -1898,6 +2199,14 @@ class ViewMeshApp(QMainWindow):
         view_menu.addAction(decrease_font_action)
         self.addAction(decrease_font_action)
 
+        view_menu.addSeparator() # Separator before developer tools
+
+        open_inspector_action = QAction("Open Inspector", self)
+        # You can add a shortcut later if desired, e.g., Ctrl+Shift+I
+        # open_inspector_action.setShortcut(QKeySequence(Qt.CTRL | Qt.SHIFT | Qt.Key_I))
+        open_inspector_action.triggered.connect(self.on_open_inspector)
+        view_menu.addAction(open_inspector_action)
+
         # Help Menu
         help_menu = self.menu_bar.addMenu("&Help")
 
@@ -1949,6 +2258,19 @@ class ViewMeshApp(QMainWindow):
             if action.text() == "Toggle &Fullscreen":
                 action.setChecked(self.isFullScreen())
                 break
+
+    def on_open_inspector(self):
+        if self.inspector_window_instance is None:
+            self.inspector_window_instance = InspectorWindow(main_app_window=self)
+            self.inspector_window_instance.show()
+            # Restore geometry AFTER showing the window for the first time
+            self.inspector_window_instance.geometry_manager.restore_geometry()
+            QApplication.processEvents() # Allow Qt to process show and move/resize
+        else:
+            # If already exists, its geometry should be current from last session or use.
+            # Just ensure it's visible and brought to the front.
+            self.inspector_window_instance.show() 
+            self.inspector_window_instance.activateWindow()
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         # Check for stopping context menu move first, as this should be global
