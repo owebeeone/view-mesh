@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QDockWidget, QFileSystemModel, 
     QTreeView, QVBoxLayout, QWidget, QMenuBar, QMenu, QStatusBar,
     QSplitter, QTabWidget, QToolBar, QMessageBox, QLabel,
-    QHBoxLayout, QPushButton, QFrame, QTextEdit # Added QTextEdit
+    QHBoxLayout, QPushButton, QFrame, QTextEdit, QScrollArea
 )
 from PySide6.QtCore import (
     Qt, QDir, QModelIndex, QSize, QPoint, QSettings, 
@@ -21,11 +21,14 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QIcon, QAction, QKeySequence, QCloseEvent, QFont, 
-    QMouseEvent, QColor, QPalette, QResizeEvent, QPainter, QCursor, QFontMetrics
+    QMouseEvent, QColor, QPalette, QResizeEvent, QPainter, QCursor, QFontMetrics, 
+    QPen, QPaintEvent
 )
 
 # Define an Enum for handle positions
 import enum
+
+DEBUG_LOGS=False
 
 class WindowGeometryManager:
     """Manages saving and restoring window geometry, handling multi-screen setups."""
@@ -227,7 +230,7 @@ class EdgeResizeHandle(QWidget):
         if w < 0: w = 0
         if h < 0: h = 0
 
-        #print(f"[DEBUG update_geometry] Pos: {self.position}, Geom: x={x},y={y},w={w},h={h}, ParentRect: {parent_rect}") # DEBUG
+        if DEBUG_LOGS: print(f"[DEBUG update_geometry] Pos: {self.position}, Geom: x={x},y={y},w={w},h={h}, ParentRect: {parent_rect}") # DEBUG
         self.setGeometry(x, y, w, h)
         self.raise_() # Ensure it's on top
 
@@ -330,58 +333,349 @@ class EdgeResizeHandle(QWidget):
         else:
             super().mouseReleaseEvent(event)
 
+class InteractiveHierarchyLabel(QLabel):
+    """A QLabel that emits signals on hover and click, and stores a target widget."""
+    hover_enter = Signal(QWidget)  # Signal to emit when mouse enters, passes target widget
+    hover_leave = Signal(QWidget)  # Signal to emit when mouse leaves, passes target widget
+    clicked = Signal(QWidget)      # Signal to emit when clicked, passes target widget
+
+    def __init__(self, target_widget: QWidget, text: str, parent=None):
+        super().__init__(text, parent)
+        self.target_widget = target_widget
+        self.setMouseTracking(True) 
+        self.setStyleSheet("color: #cccccc; background-color: transparent; padding: 1px;")
+
+    def enterEvent(self, event: QEvent):
+        if DEBUG_LOGS: print(f"[Label Hover Enter] Target: {self.target_widget.metaObject().className()} '{self.target_widget.objectName()}'") # Debug ACTIVE
+        self.hover_enter.emit(self.target_widget)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event: QEvent):
+        if DEBUG_LOGS: print(f"[Label Hover Leave] Target: {self.target_widget.metaObject().className()} '{self.target_widget.objectName()}'") # Debug ACTIVE
+        self.hover_leave.emit(self.target_widget)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.LeftButton:
+            if DEBUG_LOGS: print(f"[Label Clicked] Target: {self.target_widget.metaObject().className()} '{self.target_widget.objectName()}'") # Debug ACTIVE
+            self.clicked.emit(self.target_widget)
+        super().mousePressEvent(event)
+
+class HighlightOverlay(QWidget):
+    """A transparent widget to draw a highlight border around a target widget."""
+    def __init__(self, parent_to_overlay: QMainWindow):
+        super().__init__(parent_to_overlay)
+        self.parent_to_overlay = parent_to_overlay
+        self.target_rect = QRect()  
+        self.is_sticky = False
+        self.is_highlighting = False
+
+        self.setAttribute(Qt.WA_TransparentForMouseEvents) 
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
+        self.setGeometry(parent_to_overlay.rect()) 
+        self.hide() 
+        if DEBUG_LOGS: print("[HighlightOverlay __init__] Initialized. Geometry:", self.geometry()) # Debug ACTIVE
+
+    def update_geometry(self):
+        """Ensure overlay covers and aligns with the parent window."""
+        if self.parent_to_overlay:
+            # Assuming setWindowFlags might make this a top-level window,
+            # its geometry needs to be set in global screen coordinates.
+            parent_global_top_left = self.parent_to_overlay.mapToGlobal(QPoint(0,0))
+            parent_size = self.parent_to_overlay.size()
+            
+            self.setGeometry(parent_global_top_left.x(), 
+                             parent_global_top_left.y(), 
+                             parent_size.width(), 
+                             parent_size.height())
+            if DEBUG_LOGS: print(f"[HighlightOverlay update_geometry] Updated. Global Geometry set to: {self.geometry()}") # Debug ACTIVE
+
+    def highlight_widget(self, target_widget: Optional[QWidget], sticky: bool = False):
+        widget_class_name = target_widget.metaObject().className() if target_widget else "None"
+        widget_object_name = target_widget.objectName() if target_widget else "N/A"
+        widget_is_visible = target_widget.isVisible() if target_widget else False
+
+        if DEBUG_LOGS: print(f"[HighlightOverlay highlight_widget] Called for: Class='{widget_class_name}', Name='{widget_object_name}', IsVisible: {widget_is_visible}") # Debug ACTIVE
+        
+        # --- Start Reverted QMenu Highlighting (Original Logic) --- 
+        proceed_with_highlight = False
+        if target_widget and widget_is_visible: # Standard check for all widgets
+            proceed_with_highlight = True
+        # --- End Reverted QMenu Highlighting ---
+
+        if proceed_with_highlight: 
+            global_top_left = target_widget.mapToGlobal(QPoint(0, 0))
+            
+            self.target_rect = QRect(self.parent_to_overlay.mapFromGlobal(global_top_left),
+                                     target_widget.size())
+            
+            # Enhanced Debugging for coordinates
+            parent_global_tl = self.parent_to_overlay.mapToGlobal(QPoint(0,0))
+            overlay_global_tl = self.mapToGlobal(QPoint(0,0)) # Overlay's own global top-left
+
+            # print(f"    TargetWidget '{widget_object_name}' ({widget_class_name}):")
+            # print(f"        Global Top-Left: {global_top_left}")
+            # print(f"        Size: {target_widget.size()}")
+            # print(f"    ParentToOverlay (QMainWindow '{self.parent_to_overlay.objectName()}'):")
+            # print(f"        Global Top-Left: {parent_global_tl}")
+            # print(f"    HighlightOverlay (self):")
+            # print(f"        Global Top-Left: {overlay_global_tl}") # Should match parent_to_overlay's global top-left
+            # print(f"        Current Geometry (should match parent): {self.geometry()}")
+            # print(f"    Calculated TargetRect (local to overlay): {self.target_rect}")
+
+            self.update_geometry() # Ensure overlay is positioned correctly relative to parent
+            self.is_sticky = sticky
+            self.is_highlighting = True
+            self.update()  
+            self.show()
+            self.raise_() 
+            if DEBUG_LOGS: print(f"[HighlightOverlay highlight_widget] Highlighting. TargetRect: {self.target_rect}, Sticky: {sticky}, IsVisibleOnScreen: {self.isVisible()}, Final Overlay Geom: {self.geometry()}") # Debug ACTIVE
+        else:
+            if DEBUG_LOGS: print(f"[HighlightOverlay highlight_widget] Target None or not visible (Class='{widget_class_name}', Name='{widget_object_name}', IsVisible: {widget_is_visible}), clearing.") # Debug ACTIVE
+            self.clear_highlight()
+
+    def clear_highlight(self, force_clear_sticky: bool = False):
+        if DEBUG_LOGS: print(f"[HighlightOverlay clear_highlight] Called. IsSticky: {self.is_sticky}, ForceClear: {force_clear_sticky}") # Debug ACTIVE
+        if self.is_sticky and not force_clear_sticky:
+            if DEBUG_LOGS: print("[HighlightOverlay clear_highlight] Preserving sticky highlight.") # Debug ACTIVE
+            return 
+        
+        self.is_highlighting = False
+        self.is_sticky = False 
+        self.target_rect = QRect()
+        self.update()  
+        self.hide()
+        if DEBUG_LOGS: print("[HighlightOverlay clear_highlight] Cleared and hidden.") # Debug ACTIVE
+
+    def paintEvent(self, event: QPaintEvent):
+        # print(f"[HighlightOverlay paintEvent] Called. IsHighlighting: {self.is_highlighting}, TargetRect: {self.target_rect}") # Debug - can be noisy
+        if not self.is_highlighting or self.target_rect.isNull():
+            if DEBUG_LOGS: print("[HighlightOverlay paintEvent] Not highlighting or rect is null.") # Debug
+            super().paintEvent(event)
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        border_color = QColor(255, 0, 0, 200) 
+        if self.is_sticky:
+            border_color = QColor(200, 0, 0, 220) 
+        
+        pen_width = 2
+        pen = QPen(border_color, pen_width)
+        pen.setJoinStyle(Qt.MiterJoin) 
+        painter.setPen(pen)
+        
+        draw_rect = self.target_rect.adjusted(pen_width // 2, pen_width // 2, -pen_width // 2, -pen_width // 2)
+        painter.drawRect(draw_rect)
+        if DEBUG_LOGS: print(f"[HighlightOverlay paintEvent] Drawing rect {draw_rect} with color {border_color.name()}") # Debug ACTIVE
+        super().paintEvent(event)
+
 class InspectorWindow(QMainWindow):
     def __init__(self, main_app_window: QMainWindow, parent=None):
         super().__init__(parent)
         self.main_app_window = main_app_window
         self.config = main_app_window.config
         self.geometry_manager = WindowGeometryManager(self, self.config.inspector_settings, self.main_app_window)
+        self.highlight_overlay = HighlightOverlay(self.main_app_window)
+        self.sticky_highlighted_widget: Optional[QWidget] = None
 
         self.setWindowTitle("ViewMesh Inspector")
         
         self.tab_widget = QTabWidget()
         self.setCentralWidget(self.tab_widget)
 
-        # Hierarchy Tab - Updated
         self.hierarchy_tab = QWidget()
         self.hierarchy_layout = QVBoxLayout(self.hierarchy_tab)
         
-        self.refresh_hierarchy_button = QPushButton("Refresh Hierarchy")
-        self.refresh_hierarchy_button.clicked.connect(self._refresh_hierarchy_view)
-        self.hierarchy_layout.addWidget(self.refresh_hierarchy_button)
+        self.hierarchy_button_layout = QHBoxLayout()
+        self.refresh_xml_button = QPushButton("Refresh XML Hierarchy")
+        self.refresh_xml_button.clicked.connect(self._refresh_xml_hierarchy_view)
+        self.hierarchy_button_layout.addWidget(self.refresh_xml_button)
+
+        self.show_visual_tree_button = QPushButton("Show Visual Tree")
+        self.show_visual_tree_button.clicked.connect(self._refresh_visual_tree_view)
+        self.hierarchy_button_layout.addWidget(self.show_visual_tree_button)
+        self.hierarchy_layout.addLayout(self.hierarchy_button_layout)
         
-        self.hierarchy_text_edit = QTextEdit()
-        self.hierarchy_text_edit.setReadOnly(True)
-        self.hierarchy_text_edit.setFontFamily("monospace") # Good for XML-like text
-        self.hierarchy_layout.addWidget(self.hierarchy_text_edit)
+        self.xml_hierarchy_text_edit = QTextEdit()
+        self.xml_hierarchy_text_edit.setReadOnly(True)
+        self.xml_hierarchy_text_edit.setFontFamily("monospace")
+        self.hierarchy_layout.addWidget(self.xml_hierarchy_text_edit)
+        
+        self.visual_tree_scroll_area = QScrollArea()
+        self.visual_tree_scroll_area.setWidgetResizable(True)
+        self.visual_tree_scroll_area.setMouseTracking(True) # Enable for scroll area viewport
+        if self.visual_tree_scroll_area.viewport():
+            self.visual_tree_scroll_area.viewport().setMouseTracking(True)
+
+        self.visual_tree_content_widget = QWidget() 
+        self.visual_tree_content_widget.setStyleSheet("background-color: #252526;") 
+        self.visual_tree_content_widget.setMouseTracking(True) # Enable for content widget
+        self.visual_tree_layout = QVBoxLayout(self.visual_tree_content_widget)
+        self.visual_tree_layout.setAlignment(Qt.AlignTop)
+        self.visual_tree_content_widget.setLayout(self.visual_tree_layout)
+        self.visual_tree_scroll_area.setWidget(self.visual_tree_content_widget)
+        self.hierarchy_layout.addWidget(self.visual_tree_scroll_area)
+        self.visual_tree_scroll_area.setVisible(False)
         
         self.tab_widget.addTab(self.hierarchy_tab, "Hierarchy")
 
-        # Console Tab
+        # --- Console Tab ---
         self.console_tab = QWidget()
         self.console_layout = QVBoxLayout(self.console_tab)
         self.console_layout.addWidget(QLabel("Application Console Output (Placeholder)")) # Placeholder
         self.tab_widget.addTab(self.console_tab, "Console")
 
-        # Apply the same dark theme as the main window if desired
-        if hasattr(self.main_app_window, 'apply_vs_code_dark_theme'):
-             # This is a bit of a hack to get the stylesheet.
-             # A better way would be to have a central style manager.
-            # temp_widget = QWidget() # Create a temporary widget # Not strictly needed if using app stylesheet
-            # self.main_app_window.apply_vs_code_dark_theme() # Ensure app stylesheet is current
-            # self.setStyleSheet(QApplication.instance().styleSheet()) # This can be too broad and cause issues
-            # For now, direct styling for key elements is safer for a secondary window.
-            self.setStyleSheet("""
-                QMainWindow { background-color: #1e1e1e; color: #cccccc; }
-                QTabWidget::pane { border: 1px solid #474747; background-color: #1e1e1e; }
-                QTabBar::tab { background-color: #2d2d2d; color: #cccccc; border: 1px solid #474747; padding: 6px 12px; margin-right: 1px; }
-                QTabBar::tab:selected { background-color: #1e1e1e; border-bottom-color: #1e1e1e; }
-                QLabel { background-color: transparent; color: #cccccc; }
-            """)
+        # Apply overall dark theme to InspectorWindow and its main components
+        self.setStyleSheet("""
+            QMainWindow { background-color: #1e1e1e; color: #cccccc; }
+            QTabWidget::pane { border: 1px solid #474747; background-color: #1e1e1e; }
+            QTabBar::tab { background-color: #2d2d2d; color: #cccccc; border: 1px solid #474747; padding: 6px 12px; margin-right: 1px; }
+            QTabBar::tab:selected { background-color: #1e1e1e; border-bottom-color: #1e1e1e; }
+            QLabel { background-color: transparent; color: #cccccc; } /* Default for labels */
+            QTextEdit { background-color: #252526; color: #cccccc; border: 1px solid #474747; }
+            QPushButton { background-color: #3c3c3c; color: #cccccc; border: 1px solid #555555; padding: 5px; }
+            QPushButton:hover { background-color: #4c4c4c; }
+            QScrollArea { border: none; background-color: #252526; } /* Style scroll area itself */
+        """)
 
-    def _refresh_hierarchy_view(self):
+    def _refresh_xml_hierarchy_view(self):
+        self.xml_hierarchy_text_edit.setVisible(True)
+        self.visual_tree_scroll_area.setVisible(False)
         xml_data = self._generate_widget_hierarchy_xml()
-        self.hierarchy_text_edit.setPlainText(xml_data)
+        self.xml_hierarchy_text_edit.setPlainText(xml_data)
+
+    def _refresh_visual_tree_view(self):
+        self.xml_hierarchy_text_edit.setVisible(False)
+        self.visual_tree_scroll_area.setVisible(True)
+        
+        # Clear previous visual tree content
+        while self.visual_tree_layout.count():
+            child = self.visual_tree_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        
+        if not self.main_app_window:
+            # Add a label indicating error or unavailability
+            error_label = QLabel("<Main window not available>")
+            error_label.setStyleSheet("color: #ffcc00;") # Warning color
+            self.visual_tree_layout.addWidget(error_label)
+            return
+
+        # Start building the visual tree UI from the main_app_window
+        # prefix_parts will store the "│   " or "    " for each indent level
+        self._build_visual_widget_ui(self.main_app_window, 0, self.visual_tree_layout, []) 
+
+    def _build_visual_widget_ui(self, widget: QWidget, indent_level: int, parent_layout: QVBoxLayout, prefix_parts: list[str]):
+        class_name = widget.metaObject().className()
+        object_name = widget.objectName() or ""
+        geom = widget.geometry()
+        
+        # Construct text for the label, including geometry and specific attributes
+        attributes = []
+        if object_name:
+            attributes.append(f"name=\"{object_name.replace('\"', '&quot;')}\"")
+        attributes.append(f"geom=({geom.x()},{geom.y()},{geom.width()},{geom.height()})")
+        
+        if hasattr(widget, 'text') and callable(widget.text):
+            try:
+                widget_text = widget.text()
+                if widget_text and isinstance(widget_text, str) and "\n" not in widget_text[:20]: # Simple, short text
+                    attributes.append(f"text=\"{widget_text.replace('\"', '&quot;')[:30]}\"") # Limit length
+            except Exception: pass
+        
+        attr_string = " ".join(attributes)
+        current_prefix = "".join(prefix_parts)
+        label_text_content = f"{class_name} [{attr_string}]"
+
+        # Create and add the interactive label
+        if object_name == "title_bar_menu_bar_widget":
+            if DEBUG_LOGS: print(f"[DEBUG _build_visual_widget_ui] Creating InteractiveHierarchyLabel for QMenuBar: {label_text_content}")
+            if DEBUG_LOGS: print(f"    isVisible: {widget.isVisible()}, isVisibleTo_parent: {widget.isVisibleTo(self.main_app_window)}")
+            if DEBUG_LOGS: print(f"    geometry: {widget.geometry()}, mapToGlobal(0,0): {widget.mapToGlobal(QPoint(0,0))}")
+
+        hierarchy_label = InteractiveHierarchyLabel(widget, f"{current_prefix}{label_text_content}")
+        hierarchy_label.hover_enter.connect(self._on_hierarchy_label_hover_enter)
+        hierarchy_label.hover_leave.connect(self._on_hierarchy_label_hover_leave)
+        hierarchy_label.clicked.connect(self._on_hierarchy_label_clicked)
+        parent_layout.addWidget(hierarchy_label)
+
+        # Discover children
+        children_qwidgets = []
+        potential_children = widget.children()
+        if potential_children:
+            for child_obj in potential_children:
+                if isinstance(child_obj, QWidget):
+                    children_qwidgets.append(child_obj)
+
+        # Recursively process children
+        num_children = len(children_qwidgets)
+        for i, child_widget in enumerate(children_qwidgets):
+            if child_widget == self or (hasattr(child_widget, 'parent_window') and child_widget.parent_window == self):
+                continue
+            if isinstance(child_widget, EdgeResizeHandle):
+                continue 
+
+            is_last_child = (i == num_children - 1)
+            
+            new_prefix_parts = prefix_parts.copy()
+            if indent_level > 0: # For children of the root, their prefix is based on their parent's state
+                 # This logic might need refinement if prefix_parts wasn't managed correctly by caller for root
+                 # For simplicity, let's adjust the last element of prefix_parts before passing down
+                 pass # The logic for updating prefix_parts for drawing lines will be more complex
+           
+            # Simplified prefix for now, actual line drawing characters need more state
+            # For the text label, we just add standard indent for now
+            # The visual lines would typically be drawn *by* the label or a container
+           
+            # Determine the correct prefix characters for text representation
+            # This is a simplified text representation of tree lines
+            line_prefix = "    " * indent_level
+            if indent_level > 0: # Not for root
+                if is_last_child:
+                    line_prefix = ("    " * (indent_level -1)) + "└── " 
+                else:
+                    line_prefix = ("    " * (indent_level -1)) + "├── " 
+           
+            # Re-create the label with the tree structure characters
+            # This is a bit redundant with current structure; ideally, the label itself handles this.
+            # For now, we reconstruct the text for the label being added to the layout.
+            # This is incorrect: hierarchy_label was already added. We need to set its text again or create new.
+            # Let's simplify: the label text will be set once with current_prefix, which needs to be built correctly.
+
+            # Correct approach: build the full prefix string for *this* level before creating the label
+            # The `prefix_parts` passed down should reflect parent connections
+           
+            # Let's defer complex line drawing logic. For now, use simple spacing for indentation in text label.
+            # The earlier label creation already uses `current_prefix` which is `"    " * indent_level` effectively
+            # We need to pass child_prefix_parts to the recursive call.
+
+            child_prefix_parts = prefix_parts.copy()
+            if is_last_child:
+                child_prefix_parts.append("    ")
+            else:
+                child_prefix_parts.append("│   ") # Vertical line and space
+
+            # The label for the current widget should use the current prefix_parts correctly
+            # Let's refine the label text creation for the current widget
+            current_branch_char = ""
+            if indent_level > 0: # Not for root
+                if prefix_parts: # Safety check
+                    # Determine current widget's branch based on its parent's prefix part that corresponds to this level
+                    # This is tricky because prefix_parts is for *children*. We need to know if *current* is last.
+                    # This requires knowing if the widget itself is the last child of ITS parent.
+                    # This information needs to be passed into _build_visual_widget_ui. Let's add `is_parent_last_child`
+                    # Or simpler: `is_current_widget_last_child`
+                    pass # Deferring complex line drawing to focus on hover
+
+            # Update the label that was already created, or create it with proper prefix
+            # For now, the previous label creation is what stands. Complex lines are for later. 
+            # The text in the InteractiveHierarchyLabel will just use space indentation from `current_prefix`
+            # For the recursive call, we manage `prefix_parts` to guide children.
+
+            self._build_visual_widget_ui(child_widget, indent_level + 1, parent_layout, child_prefix_parts)
 
     def _generate_widget_hierarchy_xml(self) -> str:
         if not self.main_app_window:
@@ -497,17 +791,62 @@ class InspectorWindow(QMainWindow):
         # This method is now replaced by WindowGeometryManager
         pass
 
-    def closeEvent(self, event: QCloseEvent):
-        # self._save_geometry_and_position() # Old method call
-        self.geometry_manager.save_geometry() # Use manager
-        self.config.save() # Still need to save the AppConfig which holds inspector_settings
+    def _on_hierarchy_label_hover_enter(self, target_widget: QWidget):
+        if DEBUG_LOGS: print(f"[Inspector Hover Enter] Target: {target_widget.metaObject().className()} (Name: '{target_widget.objectName()}')") # Debug ACTIVE
+        if self.sticky_highlighted_widget == target_widget:
+            # If hovering over the currently sticky widget, ensure it's shown stickily.
+            # This call also ensures it's raised and visible if somehow obscured.
+            self.highlight_overlay.highlight_widget(target_widget, sticky=True)
+        else:
+            # Hovering over a new widget, show non-sticky highlight
+            self.highlight_overlay.highlight_widget(target_widget, sticky=False)
 
-        # print("InspectorWindow closing")
-        # Nullify reference to avoid potential issues if main window closes first etc.
-        # Or manage this window's lifecycle from ViewMeshApp more carefully
+    def _on_hierarchy_label_hover_leave(self, target_widget: QWidget):
+        if DEBUG_LOGS: print(f"[Inspector Hover Leave] Target: {target_widget.metaObject().className()} (Name: '{target_widget.objectName()}')") # Debug ACTIVE
+        if self.sticky_highlighted_widget == target_widget:
+            # Leaving the sticky widget, it should remain highlighted stickily.
+            # We can re-assert its highlight to ensure it's on top if other hovers occurred.
+            self.highlight_overlay.highlight_widget(self.sticky_highlighted_widget, sticky=True)
+            return
+        else:
+            # Leaving a non-sticky widget.
+            # If there's another widget that IS sticky, re-highlight it.
+            # Otherwise, clear any temporary hover highlight.
+            if self.sticky_highlighted_widget:
+                self.highlight_overlay.highlight_widget(self.sticky_highlighted_widget, sticky=True)
+            else:
+                # Clear any non-sticky hover highlight, ensuring overlay's internal stickiness is also cleared.
+                self.highlight_overlay.clear_highlight(force_clear_sticky=True) 
+
+    def _on_hierarchy_label_clicked(self, target_widget: QWidget):
+        if DEBUG_LOGS: print(f"[Inspector Clicked] Target: {target_widget.metaObject().className()} (Name: '{target_widget.objectName()}')") # Debug ACTIVE
+        if self.sticky_highlighted_widget == target_widget:
+            # Clicked on already sticky widget: un-stick it and clear highlight
+            self.sticky_highlighted_widget = None
+            self.highlight_overlay.clear_highlight(force_clear_sticky=True)
+        else:
+            # New widget clicked or different widget clicked: make it sticky
+            # This implicitly clears any previous sticky highlight by overlaying with a new one.
+            self.sticky_highlighted_widget = target_widget
+            self.highlight_overlay.highlight_widget(target_widget, sticky=True)
+    
+    def closeEvent(self, event: QCloseEvent):
+        # Ensure overlay is hidden when inspector closes
+        if self.highlight_overlay:
+            self.highlight_overlay.hide()
+        self.geometry_manager.save_geometry() 
+        self.config.save() 
         if hasattr(self.main_app_window, 'inspector_window_instance'):
             self.main_app_window.inspector_window_instance = None
-        super().closeEvent(event)
+        super().closeEvent(event)    
+    
+    # Add a resize event handler to ensure the overlay is resized if the inspector window is resized (and overlay is child of main)
+    # This is more relevant if the overlay is a direct child of the MAIN window, so it can resize with it.
+    # For now, HighlightOverlay.update_geometry() is called when main window might resize (e.g. InspectorWindow.showEvent maybe)
+    # Let's add it to the main window's resize event to be safe
+
+# Need to modify ViewMeshApp to call overlay.update_geometry() during its resizeEvent
+# And also potentially when the inspector is first shown.
 
 @dataclass
 class WindowSettings:
@@ -1449,6 +1788,11 @@ class ViewMeshApp(QMainWindow):
         
         # Update title bar height as well, as font changes can affect it via resize
         self._update_title_bar_height()
+
+        # Update highlight overlay geometry if inspector is open
+        if hasattr(self, 'inspector_window_instance') and self.inspector_window_instance and \
+           hasattr(self.inspector_window_instance, 'highlight_overlay') and self.inspector_window_instance.highlight_overlay:
+            self.inspector_window_instance.highlight_overlay.update_geometry()
     
     def _update_title_bar_height(self):
         """Calculates and sets the title bar height based on current menu bar font and content."""
