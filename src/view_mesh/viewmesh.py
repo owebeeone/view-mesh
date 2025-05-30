@@ -24,6 +24,7 @@ from PySide6.QtGui import (
     QMouseEvent, QColor, QPalette, QResizeEvent, QPainter, QCursor, QFontMetrics, 
     QPen, QPaintEvent, QPixmap
 )
+from abc import ABC, abstractmethod
 
 # Define an Enum for handle positions
 import enum
@@ -1549,6 +1550,211 @@ class CustomWindowFrame(QWidget):
             # self.drag_position = event.globalPos() - self.parent.frameGeometry().topLeft()
             # event.accept()
         super().mousePressEvent(event) # Pass on if not handled
+        
+
+class AppCustomizer(ABC):
+
+    @abstractmethod
+    def customise(self, app: 'ViewMeshApp'):
+        pass
+    
+    # Helper methods to create common actions
+    def create_font_size_actions(self, app_window: 'ViewMeshApp') -> Tuple[QAction, QAction]:
+        """Creates and returns 'Increase Font Size' and 'Decrease Font Size' actions."""
+        increase_font_action = QAction("Increase Font Size", app_window) # Parent to app_window for lifetime
+        increase_font_action.setShortcut(QKeySequence(Qt.CTRL | Qt.SHIFT | Qt.Key_Equal))
+        increase_font_action.triggered.connect(app_window.increase_font_size)
+        # Add to app_window's actions to make shortcut work globally if not in a visible menu
+        app_window.addAction(increase_font_action)
+
+        decrease_font_action = QAction("Decrease Font Size", app_window)
+        decrease_font_action.setShortcut(QKeySequence(Qt.CTRL | Qt.SHIFT | Qt.Key_Minus))
+        decrease_font_action.triggered.connect(app_window.decrease_font_size)
+        app_window.addAction(decrease_font_action)
+        return increase_font_action, decrease_font_action
+
+    def create_toggle_fullscreen_action(self, app_window: 'ViewMeshApp') -> QAction:
+        """Creates and returns a 'Toggle Fullscreen' action."""
+        toggle_fullscreen_action = QAction("Toggle &Fullscreen", app_window)
+        toggle_fullscreen_action.setShortcut(QKeySequence.FullScreen)
+        toggle_fullscreen_action.triggered.connect(app_window.toggle_fullscreen)
+        toggle_fullscreen_action.setCheckable(True)
+        # Set initial check state (important if menu is created after window is shown/state restored)
+        # It might be better for ViewMeshApp.toggle_fullscreen to manage the action's check state if passed.
+        # For now, let's assume it's set here. The action itself should be updated by toggle_fullscreen.
+        # The ViewMeshApp.toggle_fullscreen already updates a found action. 
+        # For robustness, the action could be passed to toggle_fullscreen or toggle_fullscreen finds it by text.
+        # For now, this is okay, but ViewMeshApp.toggle_fullscreen needs to reliably find this action if it's to update its state.
+        toggle_fullscreen_action.setChecked(app_window.isFullScreen()) 
+        return toggle_fullscreen_action
+    
+class DefaultAppCustomizer(AppCustomizer):
+
+    def _populate_menus(self, menu_bar: QMenuBar, app_window: 'ViewMeshApp'):
+        # File Menu
+        file_menu = menu_bar.addMenu("&File")
+
+        new_action = QAction("&New", app_window)
+        new_action.setShortcut(QKeySequence.New)
+        new_action.triggered.connect(app_window.on_new_file)
+        file_menu.addAction(new_action)
+
+        open_file_action = QAction("&Open File...", app_window)
+        open_file_action.setShortcut(QKeySequence.Open)
+        open_file_action.triggered.connect(app_window.on_open_file)
+        file_menu.addAction(open_file_action)
+
+        open_folder_action = QAction("Open &Folder...", app_window)
+        open_folder_action.triggered.connect(app_window.on_open_folder)
+        file_menu.addAction(open_folder_action)
+
+        file_menu.addSeparator()
+
+        save_action = QAction("&Save", app_window)
+        save_action.setShortcut(QKeySequence.Save)
+        save_action.triggered.connect(app_window.on_save)
+        file_menu.addAction(save_action)
+
+        save_as_action = QAction("Save &As...", app_window)
+        save_as_action.setShortcut(QKeySequence.SaveAs)
+        save_as_action.triggered.connect(app_window.on_save_as)
+        file_menu.addAction(save_as_action)
+
+        file_menu.addSeparator()
+
+        exit_action = QAction("E&xit", app_window)
+        exit_action.setShortcut(QKeySequence.Quit)
+        exit_action.triggered.connect(app_window.close) 
+        file_menu.addAction(exit_action)
+
+        # Edit Menu (placeholders for now)
+        edit_menu = menu_bar.addMenu("&Edit")
+        undo_action = QAction("&Undo", app_window)
+        undo_action.setShortcut(QKeySequence.Undo)
+        undo_action.triggered.connect(lambda: app_window.showMessage("Undo not implemented"))
+        edit_menu.addAction(undo_action)
+        # ... (add other Edit menu items similarly) ...
+        redo_action = QAction("&Redo", app_window)
+        redo_action.setShortcut(QKeySequence.Redo)
+        redo_action.triggered.connect(lambda: app_window.showMessage("Redo not implemented"))
+        edit_menu.addAction(redo_action)
+
+        edit_menu.addSeparator()
+
+        cut_action = QAction("Cu&t", app_window)
+        cut_action.setShortcut(QKeySequence.Cut)
+        cut_action.triggered.connect(lambda: app_window.showMessage("Cut not implemented"))
+        edit_menu.addAction(cut_action)
+
+        copy_action = QAction("&Copy", app_window)
+        copy_action.setShortcut(QKeySequence.Copy)
+        copy_action.triggered.connect(lambda: app_window.showMessage("Copy not implemented"))
+        edit_menu.addAction(copy_action)
+
+        paste_action = QAction("&Paste", app_window)
+        paste_action.setShortcut(QKeySequence.Paste)
+        paste_action.triggered.connect(lambda: app_window.showMessage("Paste not implemented"))
+        edit_menu.addAction(paste_action)
+
+        # View Menu
+        view_menu = menu_bar.addMenu("&View")
+        
+        toggle_explorer_action = QAction("Toggle &Explorer", app_window)
+        toggle_explorer_action.setCheckable(True)
+        # toggle_explorer_action.setChecked(app_window.explorer_dock.isVisible()) # Handled by connection
+        toggle_explorer_action.triggered.connect(app_window.toggle_explorer)
+        view_menu.addAction(toggle_explorer_action)
+        if hasattr(app_window, 'explorer_dock'): # Connect only if explorer_dock exists
+            app_window.explorer_dock.visibilityChanged.connect(toggle_explorer_action.setChecked)
+
+        toggle_welcome_action = QAction("Show &Welcome", app_window)
+        toggle_welcome_action.setCheckable(True)
+        if hasattr(app_window, 'welcome_dock'): # Check before accessing isVisible and connecting
+            # toggle_welcome_action.setChecked(app_window.welcome_dock.isVisible()) # Handled by connection
+            app_window.welcome_dock.visibilityChanged.connect(toggle_welcome_action.setChecked)
+        else: # If no welcome_dock, disable this menu item perhaps, or set default checked state false
+            toggle_welcome_action.setChecked(False)
+            toggle_welcome_action.setEnabled(False)
+        toggle_welcome_action.triggered.connect(app_window.toggle_welcome_panel)
+        view_menu.addAction(toggle_welcome_action)
+
+        increase_action, decrease_action = self.create_font_size_actions(app_window)
+        view_menu.addAction(increase_action)
+        view_menu.addAction(decrease_action)
+
+        fullscreen_action = self.create_toggle_fullscreen_action(app_window)
+        view_menu.addAction(fullscreen_action)
+
+        # Help Menu
+        help_menu = menu_bar.addMenu("&Help")
+        about_action = QAction("&About ViewMesh", app_window)
+        about_action.triggered.connect(app_window.on_about)
+        help_menu.addAction(about_action)
+
+    def customise(self, app: 'ViewMeshApp'):
+        # Add a placeholder tab for now - styled like VS Code welcome page
+        placeholder = QWidget()
+        placeholder.setStyleSheet("background-color: #1e1e1e;")  # Set dark background color
+        placeholder_layout = QVBoxLayout(placeholder)
+        placeholder_layout.setContentsMargins(0, 0, 0, 0)  # Remove margins
+        
+        # VS Code-like placeholder content
+        welcome_label = QLabel("Welcome to ViewMesh")
+        welcome_font = welcome_label.font()
+        # welcome_font.setPointSize(14) # Allow inheritance or set relative
+        welcome_font.setBold(True)
+        welcome_label.setFont(welcome_font)
+        welcome_label.setAlignment(Qt.AlignCenter)
+        welcome_label.setStyleSheet("color: #cccccc; margin-top: 40px; background-color: transparent;")
+        
+        placeholder_layout.addWidget(welcome_label)
+        placeholder_layout.addStretch(1)
+        
+        # Add a placeholder tab for now - styled like VS Code welcome page
+        placeholder1 = QWidget()
+        placeholder1.setStyleSheet("background-color: #1e1e1e;")
+        pl_layout1 = QVBoxLayout(placeholder1)
+        pl_layout1.addWidget(QLabel("Editor Tab 1 Content"))
+
+        placeholder2 = QWidget()
+        placeholder2.setStyleSheet("background-color: #1e1e1e;")
+        pl_layout2 = QVBoxLayout(placeholder2)
+        pl_layout2.addWidget(QLabel("Editor Tab 2 Content"))
+        
+        app.add_tab("Editor 1", placeholder1)
+        app.add_tab("Editor 2", placeholder2)
+        app.add_tab("Welcome", placeholder)
+
+        # Setup status bar widgets (copied from previous state, ensure it's correct)
+        encoding_label = QLabel("UTF-8")
+        encoding_label.setObjectName("encoding_label")
+        encoding_label.setStyleSheet("padding: 3px 8px; border-left: 1px solid rgba(255, 255, 255, 0.3); background-color: transparent; color: white;")
+        app.add_status_bar_permanent_widget(encoding_label)
+        
+        line_col_label = QLabel("Ln 1, Col 1")
+        line_col_label.setObjectName("line_col_label")
+        line_col_label.setStyleSheet("padding: 3px 8px; border-left: 1px solid rgba(255, 255, 255, 0.3); background-color: transparent; color: white;")
+        app.add_status_bar_permanent_widget(line_col_label)
+        
+        indent_label = QLabel("Spaces: 4")
+        indent_label.setObjectName("indent_label")
+        indent_label.setStyleSheet("padding: 3px 8px 3px 8px; margin-right: 3px; border-left: 1px solid rgba(255, 255, 255, 0.3); background-color: transparent; color: white;")
+        app.add_status_bar_permanent_widget(indent_label)
+        
+        status_message = QLabel("Ready")
+        status_message.setObjectName("status_message")
+        status_message.setStyleSheet("padding: 3px 8px; background-color: transparent; color: white;")
+        app.set_main_status_message_label(status_message)
+        app.add_status_bar_widget(status_message)
+
+        # Populate menus
+        if hasattr(app, 'menu_bar'): # Ensure menu_bar exists on app
+            self._populate_menus(app.menu_bar, app)
+            # After populating menus, update the title bar height to reflect the menu bar's content
+            if hasattr(app, '_update_title_bar_height') and callable(app._update_title_bar_height):
+                app._update_title_bar_height()
+        else:
+            print("Warning: ViewMeshApp instance does not have 'menu_bar' attribute. Menus not populated.")
 
 class ViewMeshApp(QMainWindow):
     """Main ViewMesh application window."""
@@ -1561,7 +1767,8 @@ class ViewMeshApp(QMainWindow):
         self.resize_handle_thickness = 5 
         self.inspector_window_instance = None 
         self.geometry_manager = WindowGeometryManager(self, self.config.settings) # Initialize manager
-
+        self._main_status_message_label: Optional[QLabel] = None # For status message updates
+        
         # Flags and positions for context menu initiated move
         self.is_context_menu_moving = False
         self.context_menu_drag_start_position = None
@@ -1644,6 +1851,10 @@ class ViewMeshApp(QMainWindow):
         
         self.installEventFilter(self) # Install event filter for ViewMeshApp itself
         # print(f"Event filter installed on {self.objectName()} in __init__") # DEBUG PRINT
+        
+    def add_tab(self, tab_name: str, widget: QWidget):
+        self.tab_widget.addTab(widget, tab_name)
+        self.tab_widget.setCurrentWidget(widget)
     
     def setup_ui(self):
         """Set up the main UI components."""
@@ -1873,37 +2084,6 @@ class ViewMeshApp(QMainWindow):
         self.tab_widget.setMovable(True)
         self.tab_widget.setDocumentMode(True)
         
-        # Add a placeholder tab for now - styled like VS Code welcome page
-        placeholder = QWidget()
-        placeholder.setStyleSheet("background-color: #1e1e1e;")  # Set dark background color
-        placeholder_layout = QVBoxLayout(placeholder)
-        placeholder_layout.setContentsMargins(0, 0, 0, 0)  # Remove margins
-        
-        # VS Code-like placeholder content
-        welcome_label = QLabel("Welcome to ViewMesh")
-        welcome_font = welcome_label.font()
-        # welcome_font.setPointSize(14) # Allow inheritance or set relative
-        welcome_font.setBold(True)
-        welcome_label.setFont(welcome_font)
-        welcome_label.setAlignment(Qt.AlignCenter)
-        welcome_label.setStyleSheet("color: #cccccc; margin-top: 40px; background-color: transparent;")
-        
-        placeholder_layout.addWidget(welcome_label)
-        placeholder_layout.addStretch(1)
-        self.tab_widget.addTab(placeholder, "Welcome")
-        
-        # Add a placeholder tab for now - styled like VS Code welcome page
-        placeholder1 = QWidget()
-        placeholder1.setStyleSheet("background-color: #1e1e1e;")
-        pl_layout1 = QVBoxLayout(placeholder1)
-        pl_layout1.addWidget(QLabel("Editor Tab 1 Content"))
-        self.tab_widget.addTab(placeholder1, "Editor 1")
-
-        placeholder2 = QWidget()
-        placeholder2.setStyleSheet("background-color: #1e1e1e;")
-        pl_layout2 = QVBoxLayout(placeholder2)
-        pl_layout2.addWidget(QLabel("Editor Tab 2 Content"))
-        self.tab_widget.addTab(placeholder2, "Editor 2")
 
         # Ensure tab widget has proper styling
         self.tab_widget.setStyleSheet("""
@@ -2310,9 +2490,15 @@ class ViewMeshApp(QMainWindow):
 
     def showMessage(self, message: str, timeout: int = 0):
         """Show a message in the status bar."""
-        if hasattr(self, 'status_message'):
-            self.status_message.setText(message)
-        else:
+        if self._main_status_message_label is not None:
+            self._main_status_message_label.setText(message)
+            # QStatusBar.showMessage also has a timeout feature for temporary messages.
+            # If we want to replicate that, we'd need a QTimer here when timeout > 0.
+            # For now, setText makes it persistent until the next call.
+            if timeout > 0:
+                # Simple way to clear after timeout, could be more robust
+                QTimer.singleShot(timeout, lambda: self._main_status_message_label.setText("") if self._main_status_message_label.text() == message else None)
+        elif hasattr(self, 'status_bar'): # Fallback if no specific label is set
             self.status_bar.showMessage(message, timeout)
 
     def setup_status_bar(self):
@@ -2330,38 +2516,29 @@ class ViewMeshApp(QMainWindow):
                 padding: 0px;
                 font-size: 9pt;
             }
-            QLabel {
+            QLabel { /* Default for labels within status bar if not overridden */
                 padding: 3px 5px;
                 margin: 0px;
+                background-color: transparent; /* Ensure transparency against blue bar */
+                color: white; /* Ensure white text */
             }
         """)
         
-        # Add permanent widgets (from right to left, as VS Code does)
-        
-        # Encoding indicator (UTF-8)
-        self.encoding_label = QLabel("UTF-8")
-        self.encoding_label.setObjectName("encoding_label")
-        self.encoding_label.setStyleSheet("padding: 3px 8px; border-left: 1px solid rgba(255, 255, 255, 0.3);")
-        self.status_bar.addPermanentWidget(self.encoding_label)
-        
-        # Line/column indicator
-        self.line_col_label = QLabel("Ln 1, Col 1")
-        self.line_col_label.setObjectName("line_col_label")
-        self.line_col_label.setStyleSheet("padding: 3px 8px; border-left: 1px solid rgba(255, 255, 255, 0.3);")
-        self.status_bar.addPermanentWidget(self.line_col_label)
-        
-        # Indent size indicator
-        self.indent_label = QLabel("Spaces: 4")
-        self.indent_label.setObjectName("indent_label")
-        # Padding: 3px top/bottom, 8px left (for border alignment). Margin: 5px right for blue space.
-        self.indent_label.setStyleSheet("padding: 3px 8px 3px 8px; margin-right: 3px; border-left: 1px solid rgba(255, 255, 255, 0.3);")
-        self.status_bar.addPermanentWidget(self.indent_label)
-        
-        # Main status message (left-aligned)
-        self.status_message = QLabel("Ready")
-        self.status_message.setObjectName("status_message")
-        self.status_message.setStyleSheet("padding: 3px 8px;")
-        self.status_bar.addWidget(self.status_message)
+        # Permanent widgets and main status message will be added by the customizer
+
+    def add_status_bar_widget(self, widget: QWidget, stretch: int = 0):
+        """Adds a widget to the status bar (typically left side)."""
+        if hasattr(self, 'status_bar'):
+            self.status_bar.addWidget(widget, stretch)
+
+    def add_status_bar_permanent_widget(self, widget: QWidget, stretch: int = 0):
+        """Adds a permanent widget to the status bar (typically right side)."""
+        if hasattr(self, 'status_bar'):
+            self.status_bar.addPermanentWidget(widget, stretch)
+
+    def set_main_status_message_label(self, label: QLabel):
+        """Sets the QLabel instance that should be used for showMessage()."""
+        self._main_status_message_label = label
 
     def show_title_bar_context_menu(self, pos):
         """Show context menu for the title bar when right-clicked."""
@@ -2381,6 +2558,8 @@ class ViewMeshApp(QMainWindow):
         if not self.isMaximized():
             size_action = context_menu.addAction("Size")
         
+        open_inspector_action_ctx = context_menu.addAction("Open Inspector") # Added here
+
         context_menu.addSeparator()
         
         app_menu = context_menu.addMenu("ViewMesh")
@@ -2421,6 +2600,8 @@ class ViewMeshApp(QMainWindow):
                         self.SendMessage(int(self.winId()), 0x0112, 0xF008, 0) # WM_SYSCOMMAND, SC_SIZE + WMSZ_BOTTOMRIGHT
                     except Exception as e:
                         print(f"Error initiating system resize from context menu with WM_SYSCOMMAND: {e}") # Keep error prints
+            elif open_inspector_action_ctx and action == open_inspector_action_ctx: # Added condition
+                self.on_open_inspector() # Connect to existing handler
             elif action == minimize_action:
                 self.showMinimized()
             elif action == close_action:
@@ -2634,129 +2815,9 @@ class ViewMeshApp(QMainWindow):
             self.maximize_button.setText("❐") # Update button text
     
     def setup_menu_items(self):
-        # File Menu
-        file_menu = self.menu_bar.addMenu("&File")
-
-        new_action = QAction("&New", self)
-        new_action.setShortcut(QKeySequence.New)
-        new_action.triggered.connect(self.on_new_file)
-        file_menu.addAction(new_action)
-
-        open_file_action = QAction("&Open File...", self)
-        open_file_action.setShortcut(QKeySequence.Open)
-        open_file_action.triggered.connect(self.on_open_file)
-        file_menu.addAction(open_file_action)
-
-        open_folder_action = QAction("Open &Folder...", self)
-        # No standard shortcut, but often Ctrl+K Ctrl+O or similar in VS Code like apps
-        open_folder_action.triggered.connect(self.on_open_folder)
-        file_menu.addAction(open_folder_action)
-
-        file_menu.addSeparator()
-
-        save_action = QAction("&Save", self)
-        save_action.setShortcut(QKeySequence.Save)
-        save_action.triggered.connect(self.on_save)
-        file_menu.addAction(save_action)
-
-        save_as_action = QAction("Save &As...", self)
-        save_as_action.setShortcut(QKeySequence.SaveAs)
-        save_as_action.triggered.connect(self.on_save_as)
-        file_menu.addAction(save_as_action)
-
-        file_menu.addSeparator()
-
-        exit_action = QAction("E&xit", self)
-        exit_action.setShortcut(QKeySequence.Quit)
-        exit_action.triggered.connect(self.close) # Connect to QMainWindow.close
-        file_menu.addAction(exit_action)
-
-        # Edit Menu (placeholders for now)
-        edit_menu = self.menu_bar.addMenu("&Edit")
-
-        undo_action = QAction("&Undo", self)
-        undo_action.setShortcut(QKeySequence.Undo)
-        undo_action.triggered.connect(lambda: self.showMessage("Undo not implemented"))
-        edit_menu.addAction(undo_action)
-
-        redo_action = QAction("&Redo", self)
-        redo_action.setShortcut(QKeySequence.Redo)
-        redo_action.triggered.connect(lambda: self.showMessage("Redo not implemented"))
-        edit_menu.addAction(redo_action)
-
-        edit_menu.addSeparator()
-
-        cut_action = QAction("Cu&t", self)
-        cut_action.setShortcut(QKeySequence.Cut)
-        cut_action.triggered.connect(lambda: self.showMessage("Cut not implemented"))
-        edit_menu.addAction(cut_action)
-
-        copy_action = QAction("&Copy", self)
-        copy_action.setShortcut(QKeySequence.Copy)
-        copy_action.triggered.connect(lambda: self.showMessage("Copy not implemented"))
-        edit_menu.addAction(copy_action)
-
-        paste_action = QAction("&Paste", self)
-        paste_action.setShortcut(QKeySequence.Paste)
-        paste_action.triggered.connect(lambda: self.showMessage("Paste not implemented"))
-        edit_menu.addAction(paste_action)
-
-        # View Menu
-        view_menu = self.menu_bar.addMenu("&View")
-
-        self.toggle_explorer_action = QAction("Toggle &Explorer", self)
-        self.toggle_explorer_action.setCheckable(True)
-        self.toggle_explorer_action.setChecked(self.explorer_dock.isVisible())
-        self.toggle_explorer_action.triggered.connect(self.toggle_explorer)
-        view_menu.addAction(self.toggle_explorer_action)
-        # Keep action state in sync if explorer is closed by other means (e.g., context menu, 'x' button on dock)
-        self.explorer_dock.visibilityChanged.connect(self.toggle_explorer_action.setChecked)
-
-        self.toggle_welcome_action = QAction("Show &Welcome", self)
-        self.toggle_welcome_action.setCheckable(True)
-        # self.toggle_welcome_action.setChecked(self.welcome_dock.isVisible()) # Set initial state
-        self.toggle_welcome_action.triggered.connect(self.toggle_welcome_panel)
-        view_menu.addAction(self.toggle_welcome_action)
-        # if hasattr(self, 'welcome_dock'): # Ensure welcome_dock exists before connecting
-            # self.welcome_dock.visibilityChanged.connect(self.toggle_welcome_action.setChecked)
-
-        toggle_fullscreen_action = QAction("Toggle &Fullscreen", self)
-        toggle_fullscreen_action.setShortcut(QKeySequence.FullScreen)
-        toggle_fullscreen_action.triggered.connect(self.toggle_fullscreen)
-        # Make it checkable to reflect state
-        toggle_fullscreen_action.setCheckable(True)
-        toggle_fullscreen_action.setChecked(self.isFullScreen())
-        view_menu.addAction(toggle_fullscreen_action)
-
-        view_menu.addSeparator()
-
-        increase_font_action = QAction("Increase Font Size", self)
-        # Using Ctrl+Shift+Plus (often on the same key as Equals)
-        increase_font_action.setShortcut(QKeySequence(Qt.CTRL | Qt.SHIFT | Qt.Key_Equal))
-        increase_font_action.triggered.connect(self.increase_font_size)
-        view_menu.addAction(increase_font_action)
-        self.addAction(increase_font_action) 
-
-        decrease_font_action = QAction("Decrease Font Size", self)
-        decrease_font_action.setShortcut(QKeySequence(Qt.CTRL | Qt.SHIFT | Qt.Key_Minus))
-        decrease_font_action.triggered.connect(self.decrease_font_size)
-        view_menu.addAction(decrease_font_action)
-        self.addAction(decrease_font_action)
-
-        view_menu.addSeparator() # Separator before developer tools
-
-        open_inspector_action = QAction("Open Inspector", self)
-        # You can add a shortcut later if desired, e.g., Ctrl+Shift+I
-        # open_inspector_action.setShortcut(QKeySequence(Qt.CTRL | Qt.SHIFT | Qt.Key_I))
-        open_inspector_action.triggered.connect(self.on_open_inspector)
-        view_menu.addAction(open_inspector_action)
-
-        # Help Menu
-        help_menu = self.menu_bar.addMenu("&Help")
-
-        about_action = QAction("&About ViewMesh", self)
-        about_action.triggered.connect(self.on_about)
-        help_menu.addAction(about_action)
+        # Menu bar is created in ViewMeshApp.setup_ui and attached to title_bar_layout
+        # Populating the menu bar is now the responsibility of the AppCustomizer
+        pass
 
     def increase_font_size(self):
         print("increase_font_size called") # Debug
@@ -2872,7 +2933,7 @@ def parse_args():
     )
     return parser.parse_args()
 
-def main():
+def main(customerizer: AppCustomizer):
     """Main entry point for the application."""
     # Parse command line arguments
     args = parse_args()
@@ -3127,10 +3188,11 @@ def main():
     
     # Create main window
     window = ViewMeshApp(config)
+    customerizer.customise(window)
     window.show()
     
     # Run the Qt event loop
     sys.exit(app.exec())
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    asyncio.run(main(DefaultAppCustomizer())) 
