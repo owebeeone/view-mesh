@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QDockWidget, QFileSystemModel, 
     QTreeView, QVBoxLayout, QWidget, QMenuBar, QMenu, QStatusBar,
     QSplitter, QTabWidget, QToolBar, QMessageBox, QLabel,
-    QHBoxLayout, QPushButton, QFrame, QTextEdit, QScrollArea
+    QHBoxLayout, QPushButton, QFrame, QTextEdit, QScrollArea, QFileDialog
 )
 from PySide6.QtCore import (
     Qt, QDir, QModelIndex, QSize, QPoint, QSettings, 
@@ -22,7 +22,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QIcon, QAction, QKeySequence, QCloseEvent, QFont, 
     QMouseEvent, QColor, QPalette, QResizeEvent, QPainter, QCursor, QFontMetrics, 
-    QPen, QPaintEvent
+    QPen, QPaintEvent, QPixmap
 )
 
 # Define an Enum for handle positions
@@ -341,7 +341,11 @@ class InteractiveHierarchyLabel(QLabel):
 
     def __init__(self, target_widget: QWidget, text: str, parent=None):
         super().__init__(text, parent)
-        self.target_widget = target_widget
+        if isinstance(target_widget, QMenu):
+            action = target_widget.menuAction()
+            self.target_widget = target_widget
+        else:
+            self.target_widget = target_widget
         self.setMouseTracking(True) 
         self.setStyleSheet("color: #cccccc; background-color: transparent; padding: 1px;")
 
@@ -372,24 +376,26 @@ class HighlightOverlay(QWidget):
 
         self.setAttribute(Qt.WA_TransparentForMouseEvents) 
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
+        # Change window flags: Remove Qt.Tool and Qt.WindowStaysOnTopHint
+        # Make it a simple frameless widget. Qt.SubWindow might also be an option
+        # but a direct child with FramelessWindowHint should work.
+        self.setWindowFlags(Qt.FramelessWindowHint)
+        # self.setWindowFlags(Qt.FramelessWindowHint | Qt.SubWindow) # Alternative if needed
+        
+        # Geometry is now relative to parent, so set it to cover parent
         self.setGeometry(parent_to_overlay.rect()) 
         self.hide() 
-        if DEBUG_LOGS: print("[HighlightOverlay __init__] Initialized. Geometry:", self.geometry()) # Debug ACTIVE
+        # Silencing debug log from __init__ as requested by user previously
+        # print("[HighlightOverlay __init__] Initialized. Geometry:", self.geometry())
 
     def update_geometry(self):
         """Ensure overlay covers and aligns with the parent window."""
         if self.parent_to_overlay:
-            # Assuming setWindowFlags might make this a top-level window,
-            # its geometry needs to be set in global screen coordinates.
-            parent_global_top_left = self.parent_to_overlay.mapToGlobal(QPoint(0,0))
-            parent_size = self.parent_to_overlay.size()
-            
-            self.setGeometry(parent_global_top_left.x(), 
-                             parent_global_top_left.y(), 
-                             parent_size.width(), 
-                             parent_size.height())
-            if DEBUG_LOGS: print(f"[HighlightOverlay update_geometry] Updated. Global Geometry set to: {self.geometry()}") # Debug ACTIVE
+            # Now a child widget, geometry is relative to parent's content rect.
+            self.setGeometry(self.parent_to_overlay.rect())
+            self.raise_() # Ensure it's on top of other children in the main window
+            # Silencing debug log as requested
+            # print(f"[HighlightOverlay update_geometry] Updated. Relative Geometry set to: {self.geometry()}")
 
     def highlight_widget(self, target_widget: Optional[QWidget], sticky: bool = False):
         widget_class_name = target_widget.metaObject().className() if target_widget else "None"
@@ -397,12 +403,8 @@ class HighlightOverlay(QWidget):
         widget_is_visible = target_widget.isVisible() if target_widget else False
 
         if DEBUG_LOGS: print(f"[HighlightOverlay highlight_widget] Called for: Class='{widget_class_name}', Name='{widget_object_name}', IsVisible: {widget_is_visible}") # Debug ACTIVE
-        
-        # --- Start Reverted QMenu Highlighting (Original Logic) --- 
-        proceed_with_highlight = False
-        if target_widget and widget_is_visible: # Standard check for all widgets
-            proceed_with_highlight = True
-        # --- End Reverted QMenu Highlighting ---
+
+        proceed_with_highlight = target_widget and widget_is_visible
 
         if proceed_with_highlight: 
             global_top_left = target_widget.mapToGlobal(QPoint(0, 0))
@@ -472,6 +474,91 @@ class HighlightOverlay(QWidget):
         if DEBUG_LOGS: print(f"[HighlightOverlay paintEvent] Drawing rect {draw_rect} with color {border_color.name()}") # Debug ACTIVE
         super().paintEvent(event)
 
+class DrawableScreenshotLabel(QLabel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.base_pixmap = QPixmap() # The original screenshot
+        self.drawing_paths = [] # List of QPainterPath objects for user drawings
+        self.current_path = None # The path currently being drawn
+        self.drawing_pen = QPen(QColor("red"), 3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        self.is_drawing = False
+
+        self.setMinimumSize(200, 150) # Ensure it has a size
+        self.setAlignment(Qt.AlignTop | Qt.AlignLeft) # Align pixmap to top-left for drawing
+
+    def setPixmap(self, pixmap: QPixmap):
+        self.base_pixmap = pixmap.copy() if pixmap else QPixmap()
+        self.drawing_paths = [] # Clear previous drawings when new pixmap is set
+        self.update() # Trigger a repaint
+        super().setPixmap(self.base_pixmap) # Show the base pixmap
+
+    def clearDrawings(self):
+        self.drawing_paths = []
+        self.update()
+
+    def getPixmapWithDrawings(self) -> QPixmap:
+        if self.base_pixmap.isNull():
+            return QPixmap() # Return empty if no base
+
+        # Create a new pixmap to draw on, matching the base pixmap's size
+        output_pixmap = self.base_pixmap.copy()
+        painter = QPainter(output_pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # Draw existing paths
+        painter.setPen(self.drawing_pen)
+        for path in self.drawing_paths:
+            painter.drawPath(path)
+        
+        painter.end()
+        return output_pixmap
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.LeftButton and not self.base_pixmap.isNull():
+            self.is_drawing = True
+            # Use QPainterPath for smooth lines
+            from PySide6.QtGui import QPainterPath # Local import for clarity
+            self.current_path = QPainterPath()
+            self.current_path.moveTo(event.position().toPoint())
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if self.is_drawing and self.current_path:
+            self.current_path.lineTo(event.position().toPoint())
+            self.update() # Repaint to show live drawing
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.LeftButton and self.is_drawing and self.current_path:
+            self.is_drawing = False
+            if not self.current_path.isEmpty():
+                self.drawing_paths.append(self.current_path)
+            self.current_path = None
+            self.update() # Final repaint of the completed path
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event: QPaintEvent):
+        super().paintEvent(event) # Draw the base pixmap (already set by QLabel.setPixmap)
+        
+        if not self.base_pixmap.isNull():
+            painter = QPainter(self) # Paint on top of the QLabel itself
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(self.drawing_pen)
+
+            # Draw completed paths
+            for path in self.drawing_paths:
+                painter.drawPath(path)
+            
+            # Draw the current path being drawn (live preview)
+            if self.current_path and not self.current_path.isEmpty():
+                painter.drawPath(self.current_path)
+
 class InspectorWindow(QMainWindow):
     def __init__(self, main_app_window: QMainWindow, parent=None):
         super().__init__(parent)
@@ -527,6 +614,40 @@ class InspectorWindow(QMainWindow):
         self.console_layout = QVBoxLayout(self.console_tab)
         self.console_layout.addWidget(QLabel("Application Console Output (Placeholder)")) # Placeholder
         self.tab_widget.addTab(self.console_tab, "Console")
+
+        # --- Screenshot Tab ---
+        self.screenshot_tab = QWidget()
+        self.screenshot_tab_layout = QVBoxLayout(self.screenshot_tab)
+        
+        self.screenshot_button_layout = QHBoxLayout() # Layout for buttons
+
+        self.take_screenshot_button = QPushButton("Take Screenshot")
+        self.take_screenshot_button.clicked.connect(self._take_screenshot)
+        self.screenshot_button_layout.addWidget(self.take_screenshot_button)
+
+        self.save_screenshot_button = QPushButton("Save Screenshot")
+        self.save_screenshot_button.clicked.connect(self._save_screenshot)
+        self.screenshot_button_layout.addWidget(self.save_screenshot_button)
+        self.save_screenshot_button.setEnabled(False) # Disabled until a screenshot is taken
+
+        self.clear_drawings_button = QPushButton("Clear Drawings")
+        self.clear_drawings_button.clicked.connect(self._clear_drawings_on_label)
+        self.screenshot_button_layout.addWidget(self.clear_drawings_button)
+        self.clear_drawings_button.setEnabled(False) # Disabled until a screenshot is taken/drawn on
+
+        self.screenshot_tab_layout.addLayout(self.screenshot_button_layout)
+        
+        self.screenshot_display_label = DrawableScreenshotLabel()
+        self.screenshot_display_label.setAlignment(Qt.AlignCenter)
+        self.screenshot_display_label.setMinimumSize(200, 150) 
+        self.screenshot_display_label.setStyleSheet("QLabel { border: 1px solid #474747; background-color: #2d2d2d; }")
+        
+        self.screenshot_scroll_area = QScrollArea()
+        self.screenshot_scroll_area.setWidgetResizable(True)
+        self.screenshot_scroll_area.setWidget(self.screenshot_display_label)
+        self.screenshot_tab_layout.addWidget(self.screenshot_scroll_area)
+
+        self.tab_widget.addTab(self.screenshot_tab, "Screenshot")
 
         # Apply overall dark theme to InspectorWindow and its main components
         self.setStyleSheet("""
@@ -609,6 +730,18 @@ class InspectorWindow(QMainWindow):
             for child_obj in potential_children:
                 if isinstance(child_obj, QWidget):
                     children_qwidgets.append(child_obj)
+                elif isinstance(child_obj, QAction):
+                    #children_qwidgets.append()
+                    action: QAction = child_obj
+                    menu = action.menu()
+                    if menu:
+                        menu_parent = menu.parent()
+                    else:
+                        menu_parent = None
+                    title = action.text()
+                    print(f"    Skipping QAction child: {type(child_obj)} parent: {type(widget)} menu: {type(menu)} menu_parent: {type(menu_parent)} title: {title}") 
+                else:
+                    print(f"    Skipping non-QWidget child: {type(child_obj)}") 
 
         # Recursively process children
         num_children = len(children_qwidgets)
@@ -839,7 +972,69 @@ class InspectorWindow(QMainWindow):
         if hasattr(self.main_app_window, 'inspector_window_instance'):
             self.main_app_window.inspector_window_instance = None
         super().closeEvent(event)    
-    
+        
+    def _take_screenshot(self):
+        if not self.main_app_window:
+            self.screenshot_display_label.setText("Main application window not available.")
+            return
+
+        # Ensure the overlay has a chance to be up-to-date.
+        QApplication.processEvents() 
+
+        try:
+            pixmap = self.main_app_window.grab()
+            
+            viewport_size = self.screenshot_scroll_area.viewport().size()
+            max_width = viewport_size.width() - 2 
+            max_height = viewport_size.height() - 2
+
+            if pixmap.width() > max_width or pixmap.height() > max_height:
+                scaled_pixmap = pixmap.scaled(max_width, max_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self.screenshot_display_label.setPixmap(scaled_pixmap)
+            else:
+                self.screenshot_display_label.setPixmap(pixmap)
+            self.save_screenshot_button.setEnabled(True) # Enable save after successful grab
+            self.clear_drawings_button.setEnabled(True) # Also enable clear drawings
+            
+        except Exception as e:
+            error_message = f"Error taking screenshot: {e}"
+            print(f"Screenshot Error: {error_message}") # Keep a print for debugging
+            self.screenshot_display_label.setText(error_message)
+            self.save_screenshot_button.setEnabled(False)
+            self.clear_drawings_button.setEnabled(False)
+
+    def _clear_drawings_on_label(self):
+        if isinstance(self.screenshot_display_label, DrawableScreenshotLabel):
+            self.screenshot_display_label.clearDrawings()
+            # Keep save button enabled as the base screenshot is still there
+
+    def _save_screenshot(self):
+        # Ensure the label is the drawable type and has a pixmap to save
+        if not isinstance(self.screenshot_display_label, DrawableScreenshotLabel) or \
+           self.screenshot_display_label.base_pixmap.isNull():
+            QMessageBox.warning(self, "Save Screenshot", "No screenshot to save. Please take a screenshot first.")
+            return
+
+        # Suggest a filename
+        default_path = str(Path(QStandardPaths.writableLocation(QStandardPaths.PicturesLocation)) / "ViewMesh_Screenshot.png")
+        
+        # Open file dialog
+        file_name, selected_filter = QFileDialog.getSaveFileName(
+            self, 
+            "Save Screenshot As", 
+            default_path,
+            "PNG Images (*.png);;JPEG Images (*.jpg *.jpeg);;All Files (*)"
+        )
+
+        if file_name:
+            pixmap_to_save = self.screenshot_display_label.getPixmapWithDrawings() # Get with drawings
+            if not pixmap_to_save.save(file_name):
+                QMessageBox.critical(self, "Save Screenshot", f"Failed to save screenshot to {file_name}.")
+            else:
+                # Optionally, provide feedback
+                # self.main_app_window.showMessage(f"Screenshot saved to {file_name}", 3000) 
+                pass # No explicit message needed, dialog closing is enough
+
     # Add a resize event handler to ensure the overlay is resized if the inspector window is resized (and overlay is child of main)
     # This is more relevant if the overlay is a direct child of the MAIN window, so it can resize with it.
     # For now, HighlightOverlay.update_geometry() is called when main window might resize (e.g. InspectorWindow.showEvent maybe)
@@ -2055,7 +2250,12 @@ class ViewMeshApp(QMainWindow):
     
     def closeEvent(self, event: QCloseEvent):
         """Handle window close event."""
-        # Save window state
+        # Close the inspector window if it exists
+        if self.inspector_window_instance is not None:
+            self.inspector_window_instance.close() # This will trigger its own save routines
+            self.inspector_window_instance = None # Ensure reference is cleared here too
+
+        # Save main window state
         self.save_window_state()
         
         # Clean up asyncio loop
@@ -2658,6 +2858,8 @@ class ViewMeshApp(QMainWindow):
                     return False # Event not handled by drag logic, let the original widget (menu_bar) process it
         
         return False
+
+
 
 def parse_args():
     """Parse command line arguments."""
