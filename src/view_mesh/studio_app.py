@@ -1555,11 +1555,11 @@ class CustomWindowFrame(QWidget):
 class AppCustomizer(ABC):
 
     @abstractmethod
-    def customise(self, app: 'ViewMeshApp'):
+    def customise(self, app: 'StudioMainWindow'):
         pass
     
     # Helper methods to create common actions
-    def create_font_size_actions(self, app_window: 'ViewMeshApp') -> Tuple[QAction, QAction]:
+    def create_font_size_actions(self, app_window: 'StudioMainWindow') -> Tuple[QAction, QAction]:
         """Creates and returns 'Increase Font Size' and 'Decrease Font Size' actions."""
         increase_font_action = QAction("Increase Font Size", app_window) # Parent to app_window for lifetime
         increase_font_action.setShortcut(QKeySequence(Qt.CTRL | Qt.SHIFT | Qt.Key_Equal))
@@ -1573,7 +1573,7 @@ class AppCustomizer(ABC):
         app_window.addAction(decrease_font_action)
         return increase_font_action, decrease_font_action
 
-    def create_toggle_fullscreen_action(self, app_window: 'ViewMeshApp') -> QAction:
+    def create_toggle_fullscreen_action(self, app_window: 'StudioMainWindow') -> QAction:
         """Creates and returns a 'Toggle Fullscreen' action."""
         toggle_fullscreen_action = QAction("Toggle &Fullscreen", app_window)
         toggle_fullscreen_action.setShortcut(QKeySequence.FullScreen)
@@ -1590,7 +1590,7 @@ class AppCustomizer(ABC):
     
 class DefaultAppCustomizer(AppCustomizer):
 
-    def _populate_menus(self, menu_bar: QMenuBar, app_window: 'ViewMeshApp'):
+    def _populate_menus(self, menu_bar: QMenuBar, app_window: 'StudioMainWindow'):
         # File Menu
         file_menu = menu_bar.addMenu("&File")
 
@@ -1691,7 +1691,7 @@ class DefaultAppCustomizer(AppCustomizer):
         about_action.triggered.connect(app_window.on_about)
         help_menu.addAction(about_action)
 
-    def customise(self, app: 'ViewMeshApp'):
+    def customise(self, app: 'StudioMainWindow'):
         # Add a placeholder tab for now - styled like VS Code welcome page
         placeholder = QWidget()
         placeholder.setStyleSheet("background-color: #1e1e1e;")  # Set dark background color
@@ -1754,11 +1754,11 @@ class DefaultAppCustomizer(AppCustomizer):
             if hasattr(app, '_update_title_bar_height') and callable(app._update_title_bar_height):
                 app._update_title_bar_height()
         else:
-            print("Warning: ViewMeshApp instance does not have 'menu_bar' attribute. Menus not populated.")
+            print("Warning: StudioMainWindow instance does not have 'menu_bar' attribute. Menus not populated.")
 
-class ViewMeshApp(QMainWindow):
-    """Main ViewMesh application window."""
-    
+class StudioMainWindow(QMainWindow):
+    """A QMainWindow implementing a versatile studio-like user interface."""
+
     def __init__(self, config: AppConfig):
         super().__init__(None, Qt.FramelessWindowHint)  # Make window frameless
         self.config = config
@@ -2416,7 +2416,7 @@ class ViewMeshApp(QMainWindow):
         # Use the geometry manager
         self.geometry_manager.save_geometry()
 
-        # Save other ViewMeshApp-specific states
+        # Save other StudioMainWindow-specific states
         self.config.settings.is_maximized = self.isMaximized()
         if hasattr(self.explorer_dock, 'width'): # Check if dock exists
             self.config.settings.explorer_width = self.explorer_dock.width()
@@ -2815,7 +2815,7 @@ class ViewMeshApp(QMainWindow):
             self.maximize_button.setText("❐") # Update button text
     
     def setup_menu_items(self):
-        # Menu bar is created in ViewMeshApp.setup_ui and attached to title_bar_layout
+        # Menu bar is created in StudioMainWindow.setup_ui and attached to title_bar_layout
         # Populating the menu bar is now the responsibility of the AppCustomizer
         pass
 
@@ -3187,7 +3187,7 @@ def main(customerizer: AppCustomizer):
     app.setStyleSheet(vs_code_style)
     
     # Create main window
-    window = ViewMeshApp(config)
+    window = StudioMainWindow(config)
     customerizer.customise(window)
     window.show()
     
