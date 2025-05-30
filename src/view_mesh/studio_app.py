@@ -374,6 +374,7 @@ class HighlightOverlay(QWidget):
         self.target_rect = QRect()  
         self.is_sticky = False
         self.is_highlighting = False
+        self.offset = (0, 0)
 
         self.setAttribute(Qt.WA_TransparentForMouseEvents) 
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -487,9 +488,10 @@ class DrawableScreenshotLabel(QLabel):
         self.setMinimumSize(200, 150) # Ensure it has a size
         self.setAlignment(Qt.AlignTop | Qt.AlignLeft) # Align pixmap to top-left for drawing
 
-    def setPixmap(self, pixmap: QPixmap):
+    def setPixmap(self, pixmap: QPixmap, offset: Tuple[int, int] = (0, 0)):
         self.base_pixmap = pixmap.copy() if pixmap else QPixmap()
         self.drawing_paths = [] # Clear previous drawings when new pixmap is set
+        self.offset = offset
         self.update() # Trigger a repaint
         super().setPixmap(self.base_pixmap) # Show the base pixmap
 
@@ -509,7 +511,7 @@ class DrawableScreenshotLabel(QLabel):
         # Draw existing paths
         painter.setPen(self.drawing_pen)
         for path in self.drawing_paths:
-            painter.drawPath(path)
+            painter.drawPath(path.translated(*self.offset))
         
         painter.end()
         return output_pixmap
@@ -991,9 +993,11 @@ class InspectorWindow(QMainWindow):
 
             if pixmap.width() > max_width or pixmap.height() > max_height:
                 scaled_pixmap = pixmap.scaled(max_width, max_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                self.screenshot_display_label.setPixmap(scaled_pixmap)
+                offset = (max_width - scaled_pixmap.width()) / -2, (max_height - scaled_pixmap.height()) / -2
+                self.screenshot_display_label.setPixmap(scaled_pixmap, offset)
             else:
-                self.screenshot_display_label.setPixmap(pixmap)
+                offset = (max_width - pixmap.width()) / -2, (max_height - pixmap.height()) / -2
+                self.screenshot_display_label.setPixmap(pixmap, offset)
             self.save_screenshot_button.setEnabled(True) # Enable save after successful grab
             self.clear_drawings_button.setEnabled(True) # Also enable clear drawings
             
