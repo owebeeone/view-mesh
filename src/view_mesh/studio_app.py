@@ -1661,11 +1661,12 @@ class DefaultAppCustomizer(AppCustomizer):
         
         toggle_explorer_action = QAction("Toggle &Explorer", app_window)
         toggle_explorer_action.setCheckable(True)
-        # toggle_explorer_action.setChecked(app_window.explorer_dock.isVisible()) # Handled by connection
+        # toggle_explorer_action.setChecked(app_window.explorer_container.isVisible()) # Handled by connection
         toggle_explorer_action.triggered.connect(app_window.toggle_explorer)
         view_menu.addAction(toggle_explorer_action)
-        if hasattr(app_window, 'explorer_dock'): # Connect only if explorer_dock exists
-            app_window.explorer_dock.visibilityChanged.connect(toggle_explorer_action.setChecked)
+        if hasattr(app_window, 'explorer_container'): # Connect only if explorer_container exists
+            # Note: QWidget doesn't have visibilityChanged signal like QDockWidget, so we'll set initial state
+            toggle_explorer_action.setChecked(app_window.explorer_container.isVisible())
 
         toggle_welcome_action = QAction("Show &Welcome", app_window)
         toggle_welcome_action.setCheckable(True)
@@ -1806,9 +1807,9 @@ class StudioMainWindow(QMainWindow):
         if self.config.settings.is_maximized:
             self.showMaximized()
         
-        # Restore dock widget sizes (specific to ViewMeshApp)
-        self.explorer_dock.setMinimumWidth(self.config.settings.explorer_width)
-        self.explorer_dock.setMaximumWidth(self.config.settings.explorer_width)
+        # Restore dock widget sizes (specific to ViewMeshApp) - Remove fixed width constraints
+        # self.explorer_container.setMinimumWidth(self.config.settings.explorer_width)  # Remove fixed constraints
+        # self.explorer_container.setMaximumWidth(self.config.settings.explorer_width)  # Remove fixed constraints
         
         # Restore complete window state if available (specific to ViewMeshApp)
         if self.config.settings.state:
@@ -2028,25 +2029,22 @@ class StudioMainWindow(QMainWindow):
         # Explorer panel with custom container
         self.explorer = FileExplorerWidget(initial_dir=self.config.initial_dir)
         
-        # Create explorer dock with custom title
-        self.explorer_dock = QDockWidget(self)
-        self.explorer_dock.setObjectName("explorer_dock")
-        self.explorer_dock.setWidget(self.explorer)
+        # Create a simple container for the explorer with custom title (instead of QDockWidget)
+        self.explorer_container = QWidget()
+        self.explorer_container_layout = QVBoxLayout(self.explorer_container)
+        self.explorer_container_layout.setContentsMargins(0, 0, 0, 0)
+        self.explorer_container_layout.setSpacing(0)
         
-        # Create and set custom title bar
-        custom_title = CustomTitleBar("EXPLORER", self.explorer_dock)  # VS Code uses uppercase
-        self.explorer_dock.setTitleBarWidget(custom_title)
+        # Create and add custom title bar
+        custom_title = CustomTitleBar("EXPLORER", self.explorer_container)  # VS Code uses uppercase
+        self.explorer_container_layout.addWidget(custom_title)
         
-        # Set dock features
-        self.explorer_dock.setFeatures(
-            QDockWidget.DockWidgetMovable | 
-            QDockWidget.DockWidgetClosable |
-            QDockWidget.DockWidgetFloatable
-        )
+        # Add the actual explorer widget
+        self.explorer_container_layout.addWidget(self.explorer)
         
-        # Style to match VS Code's explorer panel
-        self.explorer_dock.setStyleSheet("""
-            QDockWidget {
+        # Style the explorer container to match VS Code's explorer panel
+        self.explorer_container.setStyleSheet("""
+            QWidget {
                 border: none;
                 background-color: #252526;
                 color: #ffffff;
@@ -2066,14 +2064,26 @@ class StudioMainWindow(QMainWindow):
             }
         """)
         
-        # Only allow docking in left or right areas
-        self.explorer_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
-        
-        # Add dock to left panel
-        self.left_panel_layout.addWidget(self.explorer_dock)
+        # Add explorer container to left panel
+        self.left_panel_layout.addWidget(self.explorer_container)
         
         # Create splitter for sidebar and content
         self.splitter = QSplitter(Qt.Horizontal)
+        
+        # Style the splitter to make the handle visible and interactive like VS Code
+        self.splitter.setHandleWidth(1)  # Use original thin handle width
+        self.splitter.setStyleSheet("""
+            QSplitter::handle {
+                background-color: #353535;
+                border: 1px solid #474747;
+            }
+            QSplitter::handle:hover {
+                background-color: #404040;
+            }
+            QSplitter::handle:pressed {
+                background-color: #505050;
+            }
+        """)
         
         # Add left panel to splitter
         self.splitter.addWidget(self.left_panel)
@@ -2113,6 +2123,9 @@ class StudioMainWindow(QMainWindow):
         # Add content widget to splitter
         self.splitter.addWidget(self.content_widget)
         self.content_layout.addWidget(self.splitter)
+        
+        # Connect to splitter moved signal to adjust handle width based on visibility
+        self.splitter.splitterMoved.connect(self._adjust_splitter_handle_width)
         
         # Set initial splitter sizes to match VS Code's default proportions
         self.splitter.setSizes([250, 750])  # Explorer width, Content width
@@ -2418,8 +2431,8 @@ class StudioMainWindow(QMainWindow):
 
         # Save other StudioMainWindow-specific states
         self.config.settings.is_maximized = self.isMaximized()
-        if hasattr(self.explorer_dock, 'width'): # Check if dock exists
-            self.config.settings.explorer_width = self.explorer_dock.width()
+        if hasattr(self.explorer_container, 'width'): # Check if container exists
+            self.config.settings.explorer_width = self.explorer_container.width()
         self.config.settings.state = self.saveState()
         if hasattr(self.explorer, 'initial_dir'): # Check if explorer exists
             self.config.initial_dir = self.explorer.initial_dir
@@ -2472,7 +2485,7 @@ class StudioMainWindow(QMainWindow):
     
     def toggle_explorer(self, checked: bool):
         """Toggle the explorer panel."""
-        self.explorer_dock.setVisible(checked)
+        self.explorer_container.setVisible(checked)
     
     def on_about(self):
         """Show about dialog."""
@@ -2919,6 +2932,21 @@ class StudioMainWindow(QMainWindow):
                     return False # Event not handled by drag logic, let the original widget (menu_bar) process it
         
         return False
+
+    def _adjust_splitter_handle_width(self):
+        """Adjust splitter handle width based on panel visibility."""
+        sizes = self.splitter.sizes()
+        if len(sizes) != 2:
+            return
+        
+        left_size, right_size = sizes
+        min_visible_size = 50  # Minimum size to consider a panel "visible"
+        
+        # If either side is too small or invisible, make handle wider for easier grabbing
+        if left_size < min_visible_size or right_size < min_visible_size:
+            self.splitter.setHandleWidth(8)  # Wider handle when a panel is hidden
+        else:
+            self.splitter.setHandleWidth(1)  # Original thin handle when both panels visible
 
 
 

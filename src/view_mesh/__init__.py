@@ -1,3 +1,3 @@
-from view_mesh.viewmesh import main
+from view_mesh.studio_app import main, DefaultAppCustomizer, AppCustomizer
 
-__all__ = ['main']
+__all__ = ['main', 'DefaultAppCustomizer', 'AppCustomizer']
